@@ -410,6 +410,22 @@ each pair of atoms, indexed by <span class="arithmatex">\(i,j\)</span>; <span cl
 feature vectors indexed by <span class="arithmatex">\(i\)</span> for the atom, and <span class="arithmatex">\(\alpha\)</span> for the channel. The
 equations that explain each of the above layers and the hyperparameters
 available for the PiNet network are detailed below.</p>
+<p>The parameters for <code>PiNet</code> are outlined in the network specification and can be applied in the configuration file as shown in the following snippet:</p>
+<div class="highlight"><pre><span></span><code>&quot;network&quot;: {
+    &quot;name&quot;: &quot;PiNet&quot;,
+    &quot;params&quot;: {
+        &quot;atom_types&quot;: [1, 8],
+        &quot;basis_type&quot;: &quot;gaussian&quot;,
+        &quot;depth&quot;: 5,
+        &quot;ii_nodes&quot;: [16, 16, 16, 16],
+        &quot;n_basis&quot;: 10,
+        &quot;out_nodes&quot;: [16],
+        &quot;pi_nodes&quot;: [16],
+        &quot;pp_nodes&quot;: [16, 16, 16, 16],
+        &quot;rc&quot;: 6.0,
+    }
+},
+</code></pre></div>
 <h2 id="network-specification">Network specification</h2>
 <h3 id="pinetpinet">pinet.PiNet</h3>
 
