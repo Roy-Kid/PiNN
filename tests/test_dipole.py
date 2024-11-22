@@ -275,7 +275,7 @@ def _dipole_tests(params):
         500).apply(sparse_batch(50))
 
     def test(): return load_numpy(data).apply(sparse_batch(10))
-    train_spec = tf.estimator.TrainSpec(input_fn=train, max_steps=1e3)
+    train_spec = tf.estimator.TrainSpec(input_fn=train, max_steps=1e2)
     eval_spec = tf.estimator.EvalSpec(input_fn=test, steps=100)
 
     model = pinn.get_model(params)
@@ -284,4 +284,4 @@ def _dipole_tests(params):
     d_pred=[out['dipole'] for out in model.predict(lambda: load_numpy(data).apply(sparse_batch(1)))]
 
     assert np.allclose(results['METRICS/D_RMSE'],
-                       np.sqrt(np.mean((d_pred - data['d_data'])**2)), rtol=5e-2)    
+                       np.sqrt(np.mean((d_pred - data['d_data'])**2)), rtol=1e-2)    
