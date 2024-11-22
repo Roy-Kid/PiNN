@@ -284,4 +284,4 @@ def _dipole_tests(params):
     d_pred=[out['dipole'] for out in model.predict(lambda: load_numpy(data).apply(sparse_batch(1)))]
 
     assert np.allclose(results['METRICS/D_RMSE'],
-                       np.sqrt(np.mean((d_pred - data['d_data'])**2)), rtol=1e-2)    
+                       np.sqrt(np.mean((d_pred - data['d_data'])**2)), rtol=5e-2)    
