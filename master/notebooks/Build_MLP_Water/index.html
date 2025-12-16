@@ -298,7 +298,7 @@
 <div class="cell border-box-sizing text_cell rendered">
 <div class="inner_cell">
 <div class="text_cell_render border-box-sizing rendered_html">
-<h1 id="building-machine-learning-potentials-mlps-for-liquid-water">Building machine learning potentials (MLPs) for liquid water <a href="https://colab.research.google.com/github/Roy-Kid/PiNN/blob/pre-release/docs/notebooks/Build_MLP_Water.ipynb"><img alt="Open in Colab" src="https://colab.research.google.com/assets/colab-badge.svg" /></a></h1>
+<h1 id="building-machine-learning-potentials-mlps-for-liquid-water">Building machine learning potentials (MLPs) for liquid water <a href="https://colab.research.google.com/github/Teoroo-CMC/PiNN/blob/master/docs/notebooks/Build_MLP_Water.ipynb"><img alt="Open in Colab" src="https://colab.research.google.com/assets/colab-badge.svg" /></a></h1>
 <p>This notebook showcases the usage of PiNN with a practical problem of building machine learning potentials for liquid water on the H2O(l)-revPBE0-D3 dataset.
 It serves as a basic test and demonstration of the workflow with PiNN.</p>
 </div>
@@ -308,8 +308,8 @@ It serves as a basic test and demonstration of the workflow with PiNN.</p>
 <div class="input">
 
 <div class="highlight"><pre><span></span><code><span class="c1"># Install PiNN</span>
-<span class="err">!</span><span class="n">pip</span> <span class="n">install</span> <span class="n">tensorflow</span><span class="o">==</span><span class="mf">2.11</span>
-<span class="err">!</span><span class="n">pip</span> <span class="n">install</span> <span class="n">git</span><span class="o">+</span><span class="n">https</span><span class="p">:</span><span class="o">//</span><span class="n">github</span><span class="o">.</span><span class="n">com</span><span class="o">/</span><span class="n">Roy</span><span class="o">-</span><span class="n">Kid</span><span class="o">/</span><span class="n">PiNN</span><span class="nd">@jichen</span><span class="o">-</span><span class="n">pre</span><span class="o">-</span><span class="n">release</span>
+<span class="err">!</span><span class="n">pip</span> <span class="n">install</span> <span class="n">tensorflow</span><span class="o">==</span><span class="mf">2.9</span>
+<span class="err">!</span><span class="n">pip</span> <span class="n">install</span> <span class="n">git</span><span class="o">+</span><span class="n">https</span><span class="p">:</span><span class="o">//</span><span class="n">github</span><span class="o">.</span><span class="n">com</span><span class="o">/</span><span class="n">Teoroo</span><span class="o">-</span><span class="n">CMC</span><span class="o">/</span><span class="n">PiNN</span>
 </code></pre></div>
 
 </div>
@@ -453,7 +453,7 @@ It serves as a basic test and demonstration of the workflow with PiNN.</p>
 <span class="kn">from</span> <span class="nn">tempfile</span> <span class="kn">import</span> <span class="n">mkdtemp</span><span class="p">,</span> <span class="n">mkstemp</span>
 
 <span class="n">random_seed</span> <span class="o">=</span> <span class="mi">1</span> <span class="c1"># random seed for data splitting</span>
-<span class="n">num_train_steps</span> <span class="o">=</span> <span class="mi">1000</span> <span class="c1"># total number of training steps; typical training step is ~5M steps</span>
+<span class="n">num_train_steps</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="mf">5e6</span><span class="p">)</span> <span class="c1"># total number of training steps; typical training step is ~5M steps</span>
 <span class="n">eval_per_num_steps</span> <span class="o">=</span> <span class="mi">500</span> <span class="c1"># evaluate the models every eval_per_num_steps steps</span>
 <span class="n">batch_size</span> <span class="o">=</span> <span class="mi">1</span> <span class="c1"># batch size</span>
 <span class="n">nmax_ckpts</span> <span class="o">=</span> <span class="mi">1</span> <span class="c1"># max number of checkpoint file</span>
@@ -623,7 +623,12 @@ done
 <span class="kn">import</span> <span class="nn">matplotlib</span>
 <span class="kn">import</span> <span class="nn">matplotlib.pyplot</span> <span class="k">as</span> <span class="nn">plt</span>
 
-<span class="n">num_metrics</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">train_loss</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span>
+<span class="n">train_steps</span> <span class="o">=</span> <span class="n">train_loss</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+<span class="n">eval_steps</span> <span class="o">=</span> <span class="n">eval_loss</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+<span class="n">train_metrics</span> <span class="o">=</span> <span class="n">train_loss</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+<span class="n">eval_metrics</span> <span class="o">=</span> <span class="n">eval_loss</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+<span class="n">metric_keys</span> <span class="o">=</span> <span class="n">train_loss</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+<span class="n">num_metrics</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">metric_keys</span><span class="p">)</span>
 
 <span class="n">fig</span><span class="p">,</span> <span class="n">axs</span> <span class="o">=</span> <span class="n">plt</span><span class="o">.</span><span class="n">subplots</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">num_metrics</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">20</span><span class="p">,</span> <span class="mi">4</span><span class="p">))</span>
 
@@ -631,20 +636,13 @@ done
           <span class="s2">&quot;METRICS/E_RMSE&quot;</span><span class="p">:</span><span class="s2">&quot;eV&quot;</span><span class="p">,</span>
           <span class="s2">&quot;METRICS/F_RMSE&quot;</span><span class="p">:</span><span class="s2">&quot;eV/Ang&quot;</span><span class="p">}</span>
 
-<span class="n">metrics_y_max</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;METRICS/E_PER_ATOM_RMSE&quot;</span><span class="p">:</span><span class="mf">0.01</span><span class="p">,</span>
-          <span class="s2">&quot;METRICS/E_RMSE&quot;</span><span class="p">:</span><span class="mf">2.0</span><span class="p">,</span>
-          <span class="s2">&quot;METRICS/F_RMSE&quot;</span><span class="p">:</span><span class="mf">0.2</span><span class="p">}</span>
-
 <span class="k">for</span> <span class="n">index</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">num_metrics</span><span class="p">):</span>
     <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">set_xlabel</span><span class="p">(</span><span class="sa">r</span><span class="s1">&#39;Step&#39;</span><span class="p">)</span>
-    <span class="n">y_label</span> <span class="o">=</span> <span class="s2">&quot;</span><span class="si">%s</span><span class="s2">(</span><span class="si">%s</span><span class="s2">)&quot;</span><span class="o">%</span><span class="p">(</span><span class="n">train_loss</span><span class="p">[</span><span class="mi">2</span><span class="p">][</span><span class="n">index</span><span class="p">],</span> <span class="n">metrics_unit</span><span class="p">[</span><span class="n">train_loss</span><span class="p">[</span><span class="mi">2</span><span class="p">][</span><span class="n">index</span><span class="p">]])</span>
+    <span class="n">y_label</span> <span class="o">=</span> <span class="s2">&quot;</span><span class="si">%s</span><span class="s2">(</span><span class="si">%s</span><span class="s2">)&quot;</span><span class="o">%</span><span class="p">(</span><span class="n">metric_keys</span><span class="p">[</span><span class="n">index</span><span class="p">],</span> <span class="n">metrics_unit</span><span class="p">[</span><span class="n">metric_keys</span><span class="p">[</span><span class="n">index</span><span class="p">]])</span>
     <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">set_ylabel</span><span class="p">(</span><span class="n">y_label</span><span class="p">)</span>
-    <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">set_xlim</span><span class="p">(</span><span class="mf">1E6</span><span class="p">,</span> <span class="mf">5E6</span><span class="p">)</span>
-
-    <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">set_ylim</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">metrics_y_max</span><span class="p">[</span><span class="n">train_loss</span><span class="p">[</span><span class="mi">2</span><span class="p">][</span><span class="n">index</span><span class="p">]])</span>
-
-    <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">train_loss</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">train_loss</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="n">index</span><span class="p">],</span> <span class="n">color</span><span class="o">=</span><span class="s1">&#39;black&#39;</span><span class="p">,</span> <span class="n">label</span><span class="o">=</span><span class="s2">&quot;Training&quot;</span><span class="p">)</span>
-    <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">eval_loss</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">eval_loss</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="n">index</span><span class="p">],</span> <span class="n">color</span><span class="o">=</span><span class="s1">&#39;red&#39;</span><span class="p">,</span> <span class="n">label</span><span class="o">=</span><span class="s2">&quot;Validation&quot;</span><span class="p">)</span>
+    <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">set_xlim</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">num_train_steps</span><span class="p">)</span>
+    <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">train_steps</span><span class="p">,</span> <span class="n">train_metrics</span><span class="p">[</span><span class="n">index</span><span class="p">],</span> <span class="n">color</span><span class="o">=</span><span class="s1">&#39;black&#39;</span><span class="p">,</span> <span class="n">label</span><span class="o">=</span><span class="s2">&quot;Training&quot;</span><span class="p">)</span>
+    <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">eval_steps</span><span class="p">,</span> <span class="n">eval_metrics</span><span class="p">[</span><span class="n">index</span><span class="p">],</span> <span class="n">color</span><span class="o">=</span><span class="s1">&#39;red&#39;</span><span class="p">,</span> <span class="n">label</span><span class="o">=</span><span class="s2">&quot;Validation&quot;</span><span class="p">)</span>
     <span class="n">axs</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">legend</span><span class="p">(</span><span class="n">edgecolor</span><span class="o">=</span><span class="s1">&#39;none&#39;</span><span class="p">,</span> <span class="n">loc</span><span class="o">=</span><span class="s1">&#39;best&#39;</span><span class="p">)</span>
 
 <span class="n">plt</span><span class="o">.</span><span class="n">subplots_adjust</span><span class="p">(</span><span class="n">hspace</span><span class="o">=</span><span class="mi">500</span><span class="p">)</span>
@@ -674,7 +672,13 @@ done
 <div class="input">
 
 <div class="highlight"><pre><span></span><code><span class="err">!</span> <span class="n">pip</span> <span class="n">install</span> <span class="n">ase</span>
-<span class="err">!</span> <span class="n">cp</span> <span class="o">../</span><span class="n">water</span><span class="o">.</span><span class="n">xyz</span> <span class="o">./</span><span class="n">MLP_Water</span><span class="o">/</span>
+<span class="kn">import</span> <span class="nn">requests</span>
+<span class="k">with</span> <span class="n">requests</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;https://raw.githubusercontent.com/Teoroo-CMC/PiNN/refs/heads/master/docs/notebooks/MLP_Water/water.xyz&quot;</span><span class="p">,</span> <span class="n">stream</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span> <span class="k">as</span> <span class="n">r</span><span class="p">:</span>
+    <span class="n">r</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
+    <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;water.xyz&quot;</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">r</span><span class="o">.</span><span class="n">iter_content</span><span class="p">(</span><span class="n">chunk_size</span><span class="o">=</span><span class="mi">8192</span><span class="p">):</span>
+            <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">chunk</span><span class="p">)</span>
+<span class="err">!</span> <span class="n">cp</span> <span class="n">water</span><span class="o">.</span><span class="n">xyz</span> <span class="n">MLP_Water</span>
 </code></pre></div>
 
 </div>

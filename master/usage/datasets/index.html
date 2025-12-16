@@ -386,7 +386,7 @@ a <code>.tfr</code> file holds the data. For example:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">from</span> <span class="nn">glob</span> <span class="kn">import</span> <span class="n">glob</span>
 <span class="kn">from</span> <span class="nn">pinn.io</span> <span class="kn">import</span> <span class="n">load_ds</span><span class="p">,</span> <span class="n">write_tfrecord</span>
 <span class="kn">from</span> <span class="nn">pinn.io</span> <span class="kn">import</span> <span class="n">write_tfrecord</span>
-<span class="n">filelist</span> <span class="o">=</span> <span class="n">glob</span><span class="p">(</span><span class="s1">&#39;/home/yunqi/datasets/QM9/dsgdb9nsd/*.xyz&#39;</span><span class="p">)</span>
+<span class="n">filelist</span> <span class="o">=</span> <span class="n">glob</span><span class="p">(</span><span class="s1">&#39;</span><span class="si">{DATASET_PATH}</span><span class="s1">/QM9/dsgdb9nsd/*.xyz&#39;</span><span class="p">)</span>
 <span class="n">dataset</span> <span class="o">=</span> <span class="n">load_ds</span><span class="p">(</span><span class="n">filelist</span><span class="p">,</span> <span class="n">fmt</span><span class="o">=</span><span class="s1">&#39;qm9&#39;</span><span class="p">,</span> <span class="n">splits</span><span class="o">=</span><span class="p">{</span><span class="s1">&#39;train&#39;</span><span class="p">:</span><span class="mi">8</span><span class="p">,</span> <span class="s1">&#39;test&#39;</span><span class="p">:</span><span class="mi">2</span><span class="p">})[</span><span class="s1">&#39;train&#39;</span><span class="p">]</span>
 <span class="n">write_tfrecord</span><span class="p">(</span><span class="s1">&#39;train.yml&#39;</span><span class="p">,</span> <span class="n">train_set</span><span class="p">)</span>
 <span class="n">train_ds</span> <span class="o">=</span> <span class="n">load_ds</span><span class="p">(</span><span class="s1">&#39;train.yml&#39;</span><span class="p">)</span>
@@ -521,7 +521,7 @@ example:</p>
                 <code>dataset</code>
             </td>
             <td>
-                  <code>Dataset</code>
+                  <code><span title="Dataset">Dataset</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -537,7 +537,7 @@ example:</p>
                 <code>fmt</code>
             </td>
             <td>
-                  <code>str</code>
+                  <code><span title="str">str</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -553,7 +553,7 @@ example:</p>
                 <code>splits</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -569,7 +569,7 @@ example:</p>
                 <code>shuffle</code>
             </td>
             <td>
-                  <code>bool</code>
+                  <code><span title="bool">bool</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -585,7 +585,7 @@ example:</p>
                 <code>seed</code>
             </td>
             <td>
-                  <code>int</code>
+                  <code><span title="int">int</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -601,7 +601,7 @@ example:</p>
                 <code>**kwargs</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -716,7 +716,7 @@ with <code>shuffle=True</code>.</p>
                 <code>dataset</code>
             </td>
             <td>
-                  <code>str</code>
+                  <code><span title="str">str</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -732,7 +732,7 @@ with <code>shuffle=True</code>.</p>
                 <code>splits</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -748,7 +748,7 @@ with <code>shuffle=True</code>.</p>
                 <code>shuffle</code>
             </td>
             <td>
-                  <code>bool</code>
+                  <code><span title="bool">bool</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -764,7 +764,7 @@ with <code>shuffle=True</code>.</p>
                 <code>seed</code>
             </td>
             <td>
-                  <code>int</code>
+                  <code><span title="int">int</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -916,7 +916,7 @@ with <code>shuffle=True</code>.</p>
                 <code>dataset</code>
             </td>
             <td>
-                  <code>str | <span title="pinn.io.ase.io.trajectory">trajectory</span></code>
+                  <code><span title="str">str</span> | <span title="pinn.io.ase.io.trajectory">trajectory</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -932,7 +932,7 @@ with <code>shuffle=True</code>.</p>
                 <code>splits</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -948,7 +948,7 @@ with <code>shuffle=True</code>.</p>
                 <code>shuffle</code>
             </td>
             <td>
-                  <code>bool</code>
+                  <code><span title="bool">bool</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -964,7 +964,7 @@ with <code>shuffle=True</code>.</p>
                 <code>seed</code>
             </td>
             <td>
-                  <code>int</code>
+                  <code><span title="int">int</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1071,12 +1071,86 @@ with <code>shuffle=True</code>.</p>
 <a id="pinn.io.load_runner"></a>
     <div class="doc doc-contents first">
 
-        <p>Loads runner formatted trajectory
-Args:
-    flist (str): one or a list of runner formatted trajectory(s)
-    splits (dict): key-val pairs specifying the ratio of subsets
-    shuffle (bool): shuffle the dataset (only used when splitting)
-    seed (int): random seed for shuffling</p>
+        <p>Loads runner formatted trajectory. Bohr is converted to Angstrom automatically.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>flist</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>one or a list of runner formatted trajectory(s)</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>splits</code>
+            </td>
+            <td>
+                  <code><span title="dict">dict</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>key-val pairs specifying the ratio of subsets</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>shuffle</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>shuffle the dataset (only used when splitting)</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>seed</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>random seed for shuffling</p>
+              </div>
+            </td>
+            <td>
+                  <code>0</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
 
             <details class="quote">
               <summary>Source code in <code>pinn/io/runner.py</code></summary>
@@ -1094,9 +1168,11 @@ Args:
 <span class="normal">133</span>
 <span class="normal">134</span>
 <span class="normal">135</span>
-<span class="normal">136</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">def</span> <span class="nf">load_runner</span><span class="p">(</span><span class="n">flist</span><span class="p">,</span> <span class="n">splits</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
+<span class="normal">136</span>
+<span class="normal">137</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="k">def</span> <span class="nf">load_runner</span><span class="p">(</span><span class="n">flist</span><span class="p">,</span> <span class="n">splits</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">shuffle</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">0</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
-<span class="sd">    Loads runner formatted trajectory</span>
+<span class="sd">    Loads runner formatted trajectory. Bohr is converted to Angstrom automatically.</span>
+
 <span class="sd">    Args:</span>
 <span class="sd">        flist (str): one or a list of runner formatted trajectory(s)</span>
 <span class="sd">        splits (dict): key-val pairs specifying the ratio of subsets</span>
@@ -1152,7 +1228,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>flist</code>
             </td>
             <td>
-                  <code>list</code>
+                  <code><span title="list">list</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1168,7 +1244,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>splits</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1184,7 +1260,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>shuffle</code>
             </td>
             <td>
-                  <code>bool</code>
+                  <code><span title="bool">bool</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1200,7 +1276,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>seed</code>
             </td>
             <td>
-                  <code>int</code>
+                  <code><span title="int">int</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1216,7 +1292,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>label_map</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1360,7 +1436,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>filelist</code>
             </td>
             <td>
-                  <code>list</code>
+                  <code><span title="list">list</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1376,7 +1452,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>split</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1392,7 +1468,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>shuffle</code>
             </td>
             <td>
-                  <code>bool</code>
+                  <code><span title="bool">bool</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1408,7 +1484,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>seed</code>
             </td>
             <td>
-                  <code>int</code>
+                  <code><span title="int">int</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1424,7 +1500,7 @@ i.e. <code>label_map={'e_data': 'U0'}</code>.</p>
                 <code>cycle_length</code>
             </td>
             <td>
-                  <code>int</code>
+                  <code><span title="int">int</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1578,7 +1654,7 @@ specify the data to read and where it is read from.</p>
                 <code>files</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1594,7 +1670,7 @@ specify the data to read and where it is read from.</p>
                 <code>keys</code>
             </td>
             <td>
-                  <code>list</code>
+                  <code><span title="list">list</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1610,7 +1686,7 @@ specify the data to read and where it is read from.</p>
                 <code>splits</code>
             </td>
             <td>
-                  <code>dict</code>
+                  <code><span title="dict">dict</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1626,7 +1702,7 @@ specify the data to read and where it is read from.</p>
                 <code>shuffle</code>
             </td>
             <td>
-                  <code>bool</code>
+                  <code><span title="bool">bool</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1642,7 +1718,7 @@ specify the data to read and where it is read from.</p>
                 <code>seed</code>
             </td>
             <td>
-                  <code>int</code>
+                  <code><span title="int">int</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1804,10 +1880,10 @@ specify the data to read and where it is read from.</p>
       <tbody>
           <tr class="doc-section-item">
             <td>
-                <code>files</code>
+                <code>fdict_or_fpath</code>
             </td>
             <td>
-                  <code>dict | <span title="pathlib.Path">Path</span> | str</code>
+                  <code><span title="dict">dict</span> | <span title="pathlib.Path">Path</span> | <span title="str">str</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1823,7 +1899,7 @@ specify the data to read and where it is read from.</p>
                 <code>type_map</code>
             </td>
             <td>
-                  <code>dict | <span title="pathlib.Path">Path</span> | str</code>
+                  <code><span title="dict">dict</span> | <span title="pathlib.Path">Path</span> | <span title="str">str</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1839,7 +1915,7 @@ specify the data to read and where it is read from.</p>
                 <code>pbc</code>
             </td>
             <td>
-                  <code>bool</code>
+                  <code><span title="bool">bool</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1855,7 +1931,7 @@ specify the data to read and where it is read from.</p>
                 <code>shuffle</code>
             </td>
             <td>
-                  <code>bool</code>
+                  <code><span title="bool">bool</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1871,7 +1947,7 @@ specify the data to read and where it is read from.</p>
                 <code>seed</code>
             </td>
             <td>
-                  <code>int</code>
+                  <code><span title="int">int</span></code>
             </td>
             <td>
               <div class="doc-md-description">
@@ -1979,7 +2055,7 @@ specify the data to read and where it is read from.</p>
 <span class="sd">    | `type`    | `path/type.raw` | `elems`           |</span>
 
 <span class="sd">    Args:</span>
-<span class="sd">        files (dict | Path | str): input files</span>
+<span class="sd">        fdict_or_fpath (dict | Path | str): input files</span>
 <span class="sd">        type_map (dict | Path | str): mapping of type id to atomic number</span>
 <span class="sd">        pbc (bool): flag of periodic boundary condition</span>
 <span class="sd">        shuffle (bool): shuffle the dataset (only used when splitting)</span>
