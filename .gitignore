@@ -1,10 +1,5 @@
-# Local venv / accidental in-repo installs
-pinn/lib/
-pinn/bin/
-pinn/include/
-pinn/pyvenv.cfg
 
-*/__pycache__
+s*/__pycache__
 work
 .pytest_cache
 pinn.egg-info/
@@ -15,7 +10,7 @@ _build/
 .ipynb_checkpoints/
 /.coverage
 /coverage.xml
-/.nextflow*
+/.nextflow*i
 /work/
 /datasets
 /*.tar
@@ -24,4 +19,4 @@ _build/
 /models/
 *.log
 *.out
-cd
+

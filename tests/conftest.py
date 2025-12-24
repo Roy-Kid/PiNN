@@ -6,6 +6,7 @@ from pinn.io import load_numpy, sparse_batch
 from ase import Atoms
 import pytest
 
+
 def mock_data(n_data, n_batch):
     from ase.calculators.lj import LennardJones
     atoms = Atoms('H3', positions=[[0, 0, 0], [0, 1, 0], [1, 1, 0]])
