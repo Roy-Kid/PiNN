@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Numerical tests for virials and energy conservation of potentials"""
 import tempfile
+import os
 import pytest
 import numpy as np
 import tensorflow as tf
@@ -8,9 +9,17 @@ from pinn.io import load_numpy, sparse_batch
 from shutil import rmtree
 from ase import Atoms
 
+#pytest -k "test_pinet_potential and torch"
+
 @pytest.mark.forked
-def test_pinet_potential():
-    testpath = tempfile.mkdtemp()
+@pytest.mark.parametrize("backend", ["tf", "torch"])
+def test_pinet_potential(backend, tmp_path, monkeypatch):
+    # Select backend for pinn.get_model / pinn.get_calc factories
+    monkeypatch.setenv("PINN_BACKEND", backend)
+
+    # Separate model_dir per backend so checkpoints don't collide
+    testpath = tmp_path / backend
+
     network_params = {
         'ii_nodes': [8, 8],
         'pi_nodes': [8, 8],
@@ -19,22 +28,26 @@ def test_pinet_potential():
         'depth': 3,
         'rc': 5.,
         'n_basis': 5,
-        'atom_types': [1]
+        'atom_types': [1],
     }
+
     params = {
-        'model_dir': testpath,
-        'network': {
-            'name': 'PiNet',
-            'params': network_params},
+        'model_dir': str(testpath),
+        'network': {'name': 'PiNet', 'params': network_params},
         'model': {
             'name': 'potential_model',
             'params': {
                 'use_force': True,
                 'e_dress': {1: 0.5},
                 'e_scale': 5.0,
-                'e_unit': 2.0}}}
+                'e_unit': 2.0,
+            },
+        },
+        # Optional but nice: also carry backend in params
+        'backend': backend,
+    }
+
     _potential_tests(params)
-    rmtree(testpath)
 
 @pytest.mark.forked
 def test_pinet2_p3_potential():
@@ -194,8 +207,8 @@ def _get_lj_data():
 
 def _potential_tests(params):
     # Series of tasks that a potential should pass
-    import pinn
-    from pinn.calculator import PiNN_calc
+    import os
+    import pinn 
 
     data = _get_lj_data()
 
@@ -203,11 +216,30 @@ def _potential_tests(params):
         500).apply(sparse_batch(50))
 
     def test(): return load_numpy(data).apply(sparse_batch(10))
-    train_spec = tf.estimator.TrainSpec(input_fn=train, max_steps=1e3)
-    eval_spec = tf.estimator.EvalSpec(input_fn=test, steps=100)
 
+    backend = os.environ.get("PINN_BACKEND", "tf").lower()
+    print("PINN_BACKEND seen by _potential_tests:", backend)
     model = pinn.get_model(params)
-    results, _ = tf.estimator.train_and_evaluate(model, train_spec, eval_spec)
+
+    if backend == "tf":
+        train_spec = tf.estimator.TrainSpec(input_fn=train, max_steps=1e3)
+        eval_spec = tf.estimator.EvalSpec(input_fn=test, steps=100)
+        results, _ = tf.estimator.train_and_evaluate(model, train_spec, eval_spec)
+    elif backend == "torch":
+        # Torch path: you will implement this function + signature
+        # Minimal inputs: raw data dict + step counts + batch sizes used in the TF pipeline
+        results = pinn.train_and_evaluate(
+            model=model,
+            params=params,
+            data=data,
+            max_steps=1000,
+            eval_steps=100,
+            batch_size_train=50,
+            batch_size_eval=10,
+            shuffle_buffer=500,
+        )
+    else:
+        raise ValueError(f"Unknown PINN_BACKEND={backend!r}")
 
     # The calculator should be accessable with model_dir
     atoms = Atoms('H3', positions=[[0, 0, 0], [0, 1, 0], [1, 1, 0]])

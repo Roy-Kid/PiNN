@@ -120,6 +120,7 @@ def test_clist_nl():
     from ase.build import bulk
     from ase.neighborlist import neighbor_list
     from pinn.layers import CellListNL
+   # tf.compat.v1.reset_default_graph() 
 
     to_test = [bulk("Cu"), bulk("Mg"), bulk("Fe")]
     ind, coord, cell = [], [], []
@@ -127,14 +128,17 @@ def test_clist_nl():
         ind.append([[i]] * len(a))
         coord.append(a.positions)
         cell.append(a.cell)
+        
+    with tf.Graph().as_default():
+        tensors = {
+            "ind_1": tf.constant(np.concatenate(ind, axis=0), tf.int32),
+            "coord": tf.constant(np.concatenate(coord, axis=0), tf.float32),
+            "cell": tf.constant(np.stack(cell, axis=0), tf.float32),
+        }
+        nl = CellListNL(rc=10)(tensors)
 
-    tensors = {
-        "ind_1": tf.constant(np.concatenate(ind, axis=0), tf.int32),
-        "coord": tf.constant(np.concatenate(coord, axis=0), tf.float32),
-        "cell": tf.constant(np.stack(cell, axis=0), tf.float32),
-    }
-    nl = CellListNL(rc=10)(tensors)
-    dist_pinn = nl["dist"].numpy()
+        with tf.compat.v1.Session() as sess:
+            dist_pinn = sess.run(nl["dist"])
 
     dist_ase = []
     for a in to_test:
