@@ -204,7 +204,12 @@ def train_and_evaluate(
             raise ValueError(f"Expected E_pred shape (B,), got {tuple(E_pred.shape)}")
 
     # ---- forces via autograd ----
-        dE_dR = torch.autograd.grad(E_pred.sum(), coord, create_graph=False)[0]  # (B*N,3)
+        dE_dR = torch.autograd.grad(
+            E_pred.sum(),
+            coord,
+            create_graph=True,     # force loss needs gradients w.r.t. model params
+            retain_graph=True,     # keep graph for the energy term's backward()
+        )[0]
         F_pred = -dE_dR
 
     # ---- loss (same convention as test) ----
@@ -253,9 +258,20 @@ def train_and_evaluate(
     e_rmse = float(np.sqrt(e_sq_sum / max(e_count, 1)))
     f_rmse = float(np.sqrt(f_sq_sum / max(f_count, 1)))
 
-    # Save checkpoint (once you have a real model)
+    # Save checkpoint
     if hasattr(model, "state_dict"):
-        torch.save({"model_state_dict": model.state_dict(), "params": params}, os.path.join(model_dir, "model.pt"))
+        to_save = model
+        # If later you ever wrap with nn.DataParallel / DDP
+        if hasattr(model, "module"):
+            to_save = model.module
+
+        ckpt = {
+            "model_state_dict": to_save.state_dict(),
+            "params": params,
+            # Optional metadata (harmless, helps debugging)
+            "pytorch_version": torch.__version__,
+        }
+        torch.save(ckpt, os.path.join(model_dir, "model.pt"))
 
     return {
         "METRICS/E_RMSE": e_scale * e_rmse,

@@ -53,28 +53,30 @@ class TorchPiNNCalc(Calculator):
         if np.any(atoms.get_pbc()):
             tensors["cell"] = torch.tensor(atoms.cell.array, dtype=torch.float32, device=self.device)
 
-        # Model energy in “internal units” (pre-e_unit). Expect (1,) or scalar.
+        # Model already returns total energy in ASE units
         E = self.model(tensors)
-        if E.ndim == 0:
-            E = E.reshape(1)
-        if E.numel() != 1:
-            raise ValueError(f"Calculator expects one structure energy; got shape {tuple(E.shape)}")
 
-        dE_dR = torch.autograd.grad(E.sum(), coord, create_graph=False)[0]  # (N,3)
+        if E.ndim == 0:
+            E = E.view(1)
+
+        if E.numel() != 1:
+            raise ValueError(
+                f"Calculator expects one structure energy; got shape {tuple(E.shape)}"
+            )
+
+        # Forces via autograd
+        dE_dR = torch.autograd.grad(E.sum(), coord, create_graph=False)[0]
         F = -dE_dR
 
-        dress = self._dress_total(Z_np)                 # in same units as model energy output
-        E_out = (float(E.item()) + dress) * self.e_unit
-        F_out = (F.detach().cpu().numpy()) * self.e_unit
-
-        self.results["energy"] = float(E_out)
-        self.results["forces"] = F_out
+        self.results["energy"] = float(E.item())
+        self.results["forces"] = F.detach().cpu().numpy()
 
         # Simple virial-based stress (same convention you already used)
         if np.any(atoms.get_pbc()):
             V = atoms.get_volume()
-            virial = np.einsum("ni,nj->ij", R_np, F_out)  # (3,3)
-            stress_tensor = virial / V
+            F_np = self.results["forces"]
+            virial = np.einsum("ni,nj->ij", R_np, F_np)
+            stress_tensor = -virial / V
 
             self.results["stress"] = np.array(
                 [
@@ -103,8 +105,18 @@ def get_calc(model_spec, **kwargs):
 
     device = kwargs.pop("device", "cpu")
 
-    model = build_model(model_spec)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+
+    # Prefer rebuilding from checkpoint params (most reliable)
+    ckpt_params = ckpt.get("params", None)
+    build_params = ckpt_params if isinstance(ckpt_params, dict) else model_spec
+
+    model = build_model(build_params).to(device)
+
+    # Support both formats: full dict checkpoint or raw state_dict
+    state = ckpt.get("model_state_dict", ckpt)
+    model.load_state_dict(state)
+
+    model.eval()
 
     return TorchPiNNCalc(model, device=device, **kwargs)

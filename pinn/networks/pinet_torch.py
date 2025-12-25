@@ -684,62 +684,38 @@ class PreprocessLayerTorch(nn.Module):
         self.nl = CellListNLPyTorch(rc)
     
     @torch.no_grad()
-    def _build_nl_celllist(self, ind_1: torch.Tensor, coord: torch.Tensor, cell: Optional[torch.Tensor]) -> dict:
-        """
-        Build neighbor list using linked-cell algorithm per structure id.
-
-        Args:
-            ind_1: (n_atoms,1) or (n_atoms,2), uses ind_1[:,0] as structure id.
-            coord: (n_atoms,3) Cartesian coordinates.
-            cell:  None, (3,3), or (n_struct,3,3)
-
-        Returns:
-            dict with keys: ind_2, dist, diff (global indices).
-        """
+    def _build_nl_celllist(self, ind_1: torch.Tensor, coord: torch.Tensor, cell) -> dict:
         if ind_1.dtype != torch.long:
             ind_1 = ind_1.long()
         batch = ind_1[:, 0] if ind_1.ndim == 2 else ind_1
         cell_is_per_struct = (cell is not None and cell.ndim == 3)
 
-        ind2_list: List[torch.Tensor] = []
-        dist_list: List[torch.Tensor] = []
-        diff_list: List[torch.Tensor] = []
+        ind2_list = []
 
         for b in batch.unique(sorted=True).tolist():
             idx = (batch == b).nonzero(as_tuple=False).squeeze(1)
             if idx.numel() == 0:
                 continue
 
-            coord_b = coord[idx]  # local coords (n_b,3)
+            coord_b = coord[idx]  # (n_b,3)
             if cell is None:
                 nl_b = self.nl(coord_b, cell=None)
             else:
                 H = cell[b] if cell_is_per_struct else cell
                 nl_b = self.nl(coord_b, cell=H)
 
-            ind_2_local = nl_b["ind_2"]  # (n_pairs_b,2) in local [0..n_b)
+            ind_2_local = nl_b["ind_2"]  # (n_pairs_b,2) local indices
             if ind_2_local.numel() == 0:
                 continue
 
-            # Map local pair indices -> global atom indices
             gi = idx[ind_2_local[:, 0]]
             gj = idx[ind_2_local[:, 1]]
             ind2_list.append(torch.stack([gi, gj], dim=1))
-            dist_list.append(nl_b["dist"])
-            diff_list.append(nl_b["diff"])
 
         if len(ind2_list) == 0:
-            return {
-                "ind_2": coord.new_zeros((0, 2), dtype=torch.long),
-                "dist": coord.new_zeros((0,), dtype=coord.dtype),
-                "diff": coord.new_zeros((0, 3), dtype=coord.dtype),
-            }
+            return {"ind_2": coord.new_zeros((0, 2), dtype=torch.long)}
 
-        return {
-            "ind_2": torch.cat(ind2_list, dim=0),
-            "dist": torch.cat(dist_list, dim=0),
-            "diff": torch.cat(diff_list, dim=0),
-        }
+        return {"ind_2": torch.cat(ind2_list, dim=0)}
 
     @torch.no_grad()
     def _build_nl_free(self, ind_1: torch.Tensor, coord: torch.Tensor) -> dict:
@@ -861,34 +837,56 @@ class PreprocessLayerTorch(nn.Module):
             diff = torch.cat(diff_list, dim=0)
 
         return {"ind_2": ind_2, "dist": dist, "diff": diff}
-
+    
     def forward(self, tensors: dict) -> dict:
-        """
-        Ensure tensors contains prop, ind_2, dist, diff.
-
-        Required keys in tensors:
-            ind_1: (n_atoms,1) or (n_atoms,2)
-            elems: (n_atoms,)
-            coord: (n_atoms,3)
-
-        Optional:
-            cell: (3,3) or (n_struct,3,3). If present, MIC neighbor list is used.
-
-        Returns:
-            A new dict with ensured keys: prop, ind_2, dist, diff.
-        """
         out = dict(tensors)
 
         if "prop" not in out:
             prop = self.embed(out["elems"])
             out["prop"] = prop.to(dtype=out["coord"].dtype)
 
-        if "ind_2" not in out or "dist" not in out or "diff" not in out:
+        if "ind_2" not in out:
             cell = out.get("cell", None)
             nl = self._build_nl_celllist(out["ind_1"], out["coord"], cell)
-            out.update(nl)
+            out.update(nl)  # now only adds ind_2
+
+        # Ensure dist/diff exist (computed from coord with grad!)
+        if "diff" not in out or "dist" not in out:
+            cell = out.get("cell", None)
+
+            # For batching, your _build_nl_celllist loops per structure and passes H per structure.
+            # Here we need the right cell for each pair.
+            # Minimal approach: handle single-structure cell (your tests do this).
+            if cell is not None and cell.ndim == 3:
+                # If you hit this later, we’ll implement per-pair cell selection.
+                raise NotImplementedError("Per-structure cell tensors not yet supported in diff/dist computation.")
+
+            diff, dist = self._compute_diff_dist(out["coord"], out["ind_2"], cell)
+            out["diff"] = diff
+            out["dist"] = dist
 
         return out
+    
+    def _compute_diff_dist(self, coord: torch.Tensor, ind_2: torch.Tensor, cell: Optional[torch.Tensor]):
+        # IMPORTANT: this must run WITH grad enabled (no @torch.no_grad)
+        i = ind_2[:, 0]
+        j = ind_2[:, 1]
+
+        if cell is None:
+            diff = coord[j] - coord[i]
+            dist = torch.linalg.norm(diff, dim=1)
+            return diff, dist
+
+        # cell: (3,3) only here (you already pass per-structure cell into CellList)
+        H = cell.to(device=coord.device, dtype=coord.dtype)
+        H_inv = torch.linalg.inv(H)
+
+        frac = coord @ H_inv
+        dfrac = frac[j] - frac[i]
+        dfrac = dfrac - torch.round(dfrac)   # MIC wrap
+        diff = dfrac @ H
+        dist = torch.linalg.norm(diff, dim=1)
+        return diff, dist
     
     
 

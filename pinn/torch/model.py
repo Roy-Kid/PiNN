@@ -10,62 +10,74 @@ from pinn.networks.pinet_torch import PiNetTorch
 
 
 class PiNetPotentialTorch(nn.Module):
-    """Torch potential wrapper around PiNetTorch.
-
-    PiNetTorch produces per-atom contributions. This wrapper:
-      - pools per-atom contributions into per-structure total energies
-      - applies optional per-atom energy dressing
-      - applies e_scale and e_unit (to match PiNN conventions in tests)
-    """
-
-    def __init__(
-        self,
-        network: PiNetTorch,
-        *,
-        e_dress: Optional[Dict[int, float]] = None,
-        e_scale: float = 1.0,
-        e_unit: float = 1.0,
-    ) -> None:
+    def __init__(self, net, *, e_dress, e_scale, e_unit):
         super().__init__()
-        self.network = network
-        self.e_dress = {int(k): float(v) for k, v in (e_dress or {}).items()}
+        self.net = net
+        self.e_dress = {int(k): float(v) for k, v in e_dress.items()}
         self.e_scale = float(e_scale)
         self.e_unit = float(e_unit)
 
     def forward(self, tensors: dict) -> torch.Tensor:
-        """Compute per-structure energies.
-
-        Args:
-            tensors: Dict with at least:
-              - ind_1: (n_atoms, 1) or (n_atoms, 2) long
-              - elems: (n_atoms,) long
-              - coord: (n_atoms, 3) float
-            Optional:
-              - cell: (3,3) or (n_struct,3,3) float
-
-        Returns:
-            E: (n_struct,) energies in (e_unit) units, including e_scale and dressing.
         """
-        per_atom = self.network(tensors)  # (n_atoms,) when out_units==1 and no pooling
+        Returns:
+            energy per structure, shape (n_struct,)
+            in ASE energy units
+        """
+        # 1. atomic energy contributions
+        # shape: (n_atoms, 1)
+        e_atom = self.net(tensors)
 
-        ind_1 = tensors["ind_1"].long()
-        batch = ind_1[:, 0] if ind_1.ndim == 2 else ind_1
-        n_struct = int(batch.max().item()) + 1 if batch.numel() else 0
+        if e_atom.ndim == 2 and e_atom.shape[1] == 1:
+            e_atom = e_atom[:, 0]
 
-        E = torch.zeros((n_struct,), dtype=per_atom.dtype, device=per_atom.device)
-        E.index_add_(0, batch, per_atom)
+        # 2. pool atoms → structures
+        ind_1 = tensors["ind_1"][:, 0]
+        n_struct = int(ind_1.max()) + 1 if ind_1.numel() else 0
 
+        e_struct = torch.zeros(
+            n_struct,
+            device=e_atom.device,
+            dtype=e_atom.dtype,
+        )
+        e_struct.index_add_(0, ind_1, e_atom)
+
+        # 3. energy dressing (tensor form, no Python loops over atoms)
         if self.e_dress:
-            elems = tensors["elems"].long()
-            dress_pa = torch.zeros_like(per_atom)
-            for Z, val in self.e_dress.items():
-                dress_pa = dress_pa + (elems == Z).to(per_atom.dtype) * val
-            dress_E = torch.zeros((n_struct,), dtype=per_atom.dtype, device=per_atom.device)
-            dress_E.index_add_(0, batch, dress_pa)
-            E = E + dress_E
+            elems = tensors["elems"]
+            dress_atom = torch.zeros_like(e_atom)
+            for z, val in self.e_dress.items():
+                dress_atom = dress_atom + (elems == z).to(e_atom.dtype) * val
+            e_struct = e_struct + torch.zeros_like(e_struct).index_add_(0, ind_1, dress_atom)
 
-        return E * self.e_scale * self.e_unit
+        # 4. scaling + units
+        e_struct = e_struct * self.e_unit
 
+        return e_struct
+
+
+def _materialize_lazy(model: torch.nn.Module, *, atom_types) -> None:
+    """Run a tiny dummy forward to materialize LazyLinear parameters.
+
+    The calc-reload smoke test saves model.state_dict() immediately after
+    pinn.get_model(params), so Lazy modules must be initialized here.
+    """
+    # Put dummy tensors on the same device as the model (cpu in tests, but be safe).
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:
+        device = torch.device("cpu")
+
+    z0 = int(atom_types[0]) if len(atom_types) else 1
+
+    tensors = {
+        "coord": torch.zeros((2, 3), dtype=torch.float32, device=device),              # (N,3)
+        "elems": torch.tensor([z0, z0], dtype=torch.long, device=device),              # (N,)
+        "ind_1": torch.zeros((2, 1), dtype=torch.long, device=device),                 # (N,1)
+    }
+
+    model.eval()
+    with torch.no_grad():
+        _ = model(tensors)
 
 def get_model(params: dict, **kwargs) -> nn.Module:
     """Torch backend model factory.
@@ -100,9 +112,13 @@ def get_model(params: dict, **kwargs) -> nn.Module:
         act=act,
     )
 
-    return PiNetPotentialTorch(
+    model = PiNetPotentialTorch(
         net,
         e_dress=mparams.get("e_dress", {}),
         e_scale=float(mparams.get("e_scale", 1.0)),
         e_unit=float(mparams.get("e_unit", 1.0)),
     )
+
+    _materialize_lazy(model, atom_types=net_params["atom_types"])
+
+    return model
