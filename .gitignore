@@ -1,3 +1,9 @@
+# Local venv / accidental in-repo installs
+pinn/lib/
+pinn/bin/
+pinn/include/
+pinn/pyvenv.cfg
+
 */__pycache__
 work
 .pytest_cache
@@ -18,3 +24,4 @@ _build/
 /models/
 *.log
 *.out
+cd
