@@ -1,7 +1,7 @@
 # pinn/torch/model.py
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -90,7 +90,7 @@ def get_model(params: dict, **kwargs) -> nn.Module:
     mparams = params["model"]["params"]
 
     # Require the keys that define the architecture in tests/YAML.
-    required = ["atom_types", "rc", "n_basis", "pp_nodes", "pi_nodes", "ii_nodes", "out_nodes", "depth"]
+    required = ["atom_types", "rc"]
     missing = [k for k in required if k not in net_params]
     if missing:
         raise KeyError(f"Missing network params for torch PiNet: {missing}")
@@ -99,18 +99,19 @@ def get_model(params: dict, **kwargs) -> nn.Module:
     act = net_params.get("act", "tanh")
 
     net = PiNetTorch(
-        atom_types=net_params["atom_types"],
-        rc=float(net_params["rc"]),
-        n_basis=int(net_params["n_basis"]),
-        pp_nodes=net_params["pp_nodes"],
-        pi_nodes=net_params["pi_nodes"],
-        ii_nodes=net_params["ii_nodes"],
-        out_nodes=net_params["out_nodes"],
-        depth=int(net_params["depth"]),
-        out_units=1,       # test_pinet_potential assumes scalar energy
-        out_pool=False,    # potential wrapper will pool to per-structure energy
-        act=act,
+            atom_types=net_params["atom_types"],
+            rc=float(net_params["rc"]),
+            n_basis=int(net_params.get("n_basis", 5)),
+            depth=int(net_params.get("depth", 3)),
+            pp_nodes=net_params.get("pp_nodes", [8, 8]),
+            pi_nodes=net_params.get("pi_nodes", [8, 8]),
+            ii_nodes=net_params.get("ii_nodes", [8, 8]),
+            out_nodes=net_params.get("out_nodes", [8, 8]),
+            act=net_params.get("act", "tanh"),
+            out_units=1,
+            out_pool=False,
     )
+
 
     model = PiNetPotentialTorch(
         net,
