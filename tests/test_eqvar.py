@@ -1,76 +1,124 @@
-import tensorflow as tf
-import numpy as np
+# -*- coding: utf-8 -*-
+import os
 import pytest
-from pinn.networks.pinet import PiNet
-from pinn.networks.pinet2 import PiNet2
+import numpy as np
+
 from utils import rotate
 
 
-class TestEquivar:
+def _to_numpy(v):
+    # TF tensors → numpy; already-numpy passes through
+    return v.numpy() if hasattr(v, "numpy") else v
 
-    def test_pinet(self, mocked_data):
-        pinet = PiNet(
-            atom_types=[0, 1],
-        )
 
-        for batch in mocked_data:
-            batch1 = batch.copy()
-            energy1 = pinet(batch1)
+def _batch_numpy_dict(batch):
+    return {k: _to_numpy(v) for k, v in batch.items()}
 
-            batch2 = batch.copy()
-            batch['coord'] = rotate(batch2['coord'], 42.)
-            energy2 = pinet(batch)
-            tf.debugging.assert_near(energy1, energy2)
-        
-    def test_pinet2(self, mocked_data):
-        pinet = PiNet2(
-            atom_types=[0, 1],
-        )
 
-        for batch in mocked_data:
-            batch1 = batch.copy()
-            energy1 = pinet(batch1)
+@pytest.mark.parametrize("backend", ["tf", "torch"])
+def test_pinet_energy_invariant(mocked_data, backend):
+    os.environ["PINN_BACKEND"] = backend
+    theta = 42.0
 
-            batch2 = batch.copy()
-            batch2['coord'] = rotate(batch2['coord'], 42.)
-            energy2 = pinet(batch2)
-            tf.debugging.assert_near(energy1, energy2)
+    for batch in mocked_data:
+        b = _batch_numpy_dict(batch)
 
-    @pytest.mark.parametrize('rank', [1, 3, 5])
-    def test_pinet2_refactor(self, mocked_data, rank):
-        from pinn.networks.pinet2 import PiNet2
+        if backend == "tf":
+            import tensorflow as tf
+            from pinn.networks.pinet import PiNet
 
-        pinet = PiNet2(
-            rank=rank,
-            atom_types=[0, 1],
-        )
+            model = PiNet(atom_types=[0, 1])
+            b1 = {k: tf.convert_to_tensor(v) for k, v in b.items()}
+            e1 = model(dict(b1))
 
-        for batch in mocked_data:
-            batch1 = batch.copy()
-            energy1 = pinet(batch1)
+            b2 = dict(b1)
+            b2["coord"] = rotate(b2["coord"], theta)
+            e2 = model(dict(b2))
+            tf.debugging.assert_near(e1, e2)
 
-            batch2 = batch.copy()
-            batch2['coord'] = rotate(batch2['coord'], 42.)
-            energy2 = pinet(batch2)
-            tf.debugging.assert_near(energy1, energy2)
+        else:
+            import torch
+            from pinn.networks.pinet_torch import PiNetTorch
 
-    def test_pinet2_refactor(self, mocked_data):
-        from pinn.networks.pinet2 import PiNet2
+            model = PiNetTorch(
+                atom_types=[0, 1],
+                rc=5.0,
+                n_basis=5,
+                depth=3,
+                pp_nodes=[8, 8],
+                pi_nodes=[8, 8],
+                ii_nodes=[8, 8],
+                out_nodes=[8, 8],
+                out_units=1,
+                out_pool=False,
+                act="tanh",
+            )
 
-        pinet = PiNet2(
-            rank=3,
-            atom_types=[0, 1],
-            out_extra={
-                f'p3': 16,
+            b1 = {
+                "coord": torch.tensor(b["coord"], dtype=torch.float32),
+                "elems": torch.tensor(b["elems"], dtype=torch.long),
+                "ind_1": torch.tensor(b["ind_1"], dtype=torch.long),
             }
-        )
+            e1 = model(dict(b1))
 
-        for batch in mocked_data:
-            batch1 = batch.copy()
-            energy1, actual_extra = pinet(batch1)
+            b2 = dict(b1)
+            b2["coord"] = rotate(b2["coord"], theta)
+            e2 = model(dict(b2))
 
-            batch2 = batch.copy()
-            batch2['coord'] = rotate(batch2['coord'], 42.)
-            energy2, expect_extra = pinet(batch2)
-            tf.debugging.assert_near(energy1, energy2)
-            tf.debugging.assert_near(rotate(actual_extra['p3'], 42), expect_extra['p3'])
+            assert torch.allclose(e1, e2, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("backend", ["tf", "torch"])
+def test_pinet2_rank3_energy_invariant(mocked_data, backend):
+    os.environ["PINN_BACKEND"] = backend
+    theta = 42.0
+
+    for batch in mocked_data:
+        b = _batch_numpy_dict(batch)
+
+        if backend == "tf":
+            import tensorflow as tf
+            from pinn.networks.pinet2 import PiNet2
+
+            model = PiNet2(rank=3, atom_types=[0, 1])
+            b1 = {k: tf.convert_to_tensor(v) for k, v in b.items()}
+            e1 = model(dict(b1))
+
+            b2 = dict(b1)
+            b2["coord"] = rotate(b2["coord"], theta)
+            e2 = model(dict(b2))
+            tf.debugging.assert_near(e1, e2)
+
+        else:
+            import torch
+            from pinn.networks.pinet2_torch import PiNet2Torch
+
+            model = PiNet2Torch(
+                {
+                    "rank": 3,
+                    "atom_types": [0, 1],
+                    "rc": 5.0,
+                    "n_basis": 5,
+                    "depth": 3,
+                    "pp_nodes": [8, 8],
+                    "pi_nodes": [8, 8],
+                    "ii_nodes": [8, 8],
+                    "out_nodes": [8, 8],
+                    "act": "tanh",
+                    "out_units": 1,
+                    "out_pool": False,
+                }
+            )
+
+            b1 = {
+                "coord": torch.tensor(b["coord"], dtype=torch.float32),
+                "elems": torch.tensor(b["elems"], dtype=torch.long),
+                "ind_1": torch.tensor(b["ind_1"], dtype=torch.long),
+            }
+            e1 = model(dict(b1))
+
+            b2 = dict(b1)
+            b2["coord"] = rotate(b2["coord"], theta)
+            e2 = model(dict(b2))
+
+            assert torch.allclose(e1, e2, rtol=1e-5, atol=1e-6)

@@ -50,33 +50,32 @@ def test_pinet_potential(backend, tmp_path, monkeypatch):
     _potential_tests(params)
 
 @pytest.mark.forked
-def test_pinet2_p3_potential():
-    testpath = tempfile.mkdtemp()
+@pytest.mark.parametrize("backend", ["tf", "torch"])
+def test_pinet2_p3_potential(backend, tmp_path, monkeypatch):
+    monkeypatch.setenv("PINN_BACKEND", backend)
+    # Separate model_dir per backend so checkpoints don't collide
+    testpath = tmp_path / backend
+
     network_params = {
-        'ii_nodes': [8, 8],
-        'pi_nodes': [8, 8],
-        'pp_nodes': [8, 8],
-        'out_nodes': [8, 8],
-        'depth': 3,
-        'rc': 5.,
-        'n_basis': 5,
-        'atom_types': [1],
-        'rank': 3
+        "ii_nodes": [8, 8],
+        "pi_nodes": [8, 8],
+        "pp_nodes": [8, 8],
+        "out_nodes": [8, 8],
+        "depth": 3,
+        "rc": 5.0,
+        "n_basis": 5,
+        "atom_types": [1],
+        "rank": 3,
     }
     params = {
-        'model_dir': testpath,
-        'network': {
-            'name': 'PiNet2',
-            'params': network_params},
-        'model': {
-            'name': 'potential_model',
-            'params': {
-                'use_force': True,
-                'e_dress': {1: 0.5},
-                'e_scale': 5.0,
-                'e_unit': 2.0}}}
+        "model_dir": str(testpath),
+        "network": {"name": "PiNet2", "params": network_params},
+        "model": {
+            "name": "potential_model",
+            "params": {"use_force": True, "e_dress": {1: 0.5}, "e_scale": 5.0, "e_unit": 2.0},
+        },
+    }
     _potential_tests(params)
-    rmtree(testpath)
 
 @pytest.mark.forked
 def test_pinet2_p5_potential():

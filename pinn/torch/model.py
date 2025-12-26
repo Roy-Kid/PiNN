@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from pinn.networks.pinet_torch import PiNetTorch
+from pinn.networks.pinet2_torch import PiNet2Torch
 
 
 class PiNetPotentialTorch(nn.Module):
@@ -98,19 +99,33 @@ def get_model(params: dict, **kwargs) -> nn.Module:
     # Optional / nice-to-have defaults are OK.
     act = net_params.get("act", "tanh")
 
-    net = PiNetTorch(
-            atom_types=net_params["atom_types"],
-            rc=float(net_params["rc"]),
-            n_basis=int(net_params.get("n_basis", 5)),
-            depth=int(net_params.get("depth", 3)),
-            pp_nodes=net_params.get("pp_nodes", [8, 8]),
-            pi_nodes=net_params.get("pi_nodes", [8, 8]),
-            ii_nodes=net_params.get("ii_nodes", [8, 8]),
-            out_nodes=net_params.get("out_nodes", [8, 8]),
-            act=net_params.get("act", "tanh"),
-            out_units=1,
-            out_pool=False,
+    net_name = params["network"]["name"]
+
+    common_kwargs = dict(
+        atom_types=net_params["atom_types"],
+        rc=float(net_params["rc"]),
+        n_basis=int(net_params.get("n_basis", 5)),
+        depth=int(net_params.get("depth", 3)),
+        pp_nodes=net_params.get("pp_nodes", [8, 8]),
+        pi_nodes=net_params.get("pi_nodes", [8, 8]),
+        ii_nodes=net_params.get("ii_nodes", [8, 8]),
+        out_nodes=net_params.get("out_nodes", [8, 8]),
+        act=net_params.get("act", "tanh"),
+        out_units=1,
+        out_pool=False,
     )
+
+    if net_name == "PiNet":
+        net = PiNetTorch(**common_kwargs)
+
+    elif net_name == "PiNet2":
+        # PiNet2Torch(params_dict) expects a single dict argument
+        pinet2_params = dict(common_kwargs)
+        pinet2_params["rank"] = int(net_params.get("rank", 3))
+        pinet2_params["torsion_boost"] = bool(net_params.get("torsion_boost", False))
+        net = PiNet2Torch(pinet2_params)
+    else:
+        raise ValueError(f"Unknown network: {net_name}")
 
 
     model = PiNetPotentialTorch(
