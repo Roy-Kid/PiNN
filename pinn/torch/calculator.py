@@ -9,6 +9,24 @@ from ase.calculators.calculator import Calculator, all_changes
 from .model import get_model as build_model
 
 
+def _find_preprocess(obj):
+    """
+    Try a bunch of common wrapper attributes to find a .preprocess(tensors) callable.
+    Returns callable or None.
+    """
+    # direct
+    if hasattr(obj, "preprocess") and callable(getattr(obj, "preprocess")):
+        return obj.preprocess
+
+    # common wrappers
+    for attr in ("network", "net", "module", "model"):
+        if hasattr(obj, attr):
+            sub = getattr(obj, attr)
+            if hasattr(sub, "preprocess") and callable(getattr(sub, "preprocess")):
+                return sub.preprocess
+
+    return None
+
 class TorchPiNNCalc(Calculator):
     """ASE calculator for the Torch backend.
 
@@ -53,6 +71,17 @@ class TorchPiNNCalc(Calculator):
         if np.any(atoms.get_pbc()):
             tensors["cell"] = torch.tensor(atoms.cell.array, dtype=torch.float32, device=self.device)
 
+        need_stress = ("stress" in properties) and np.any(atoms.get_pbc())
+        # Only run preprocess if we need stress under PBC
+        if need_stress:
+            preprocess = _find_preprocess(self.model)
+            if preprocess is None:
+                raise RuntimeError(
+                    "PBC stress requested, but torch model does not expose preprocess(). "
+                    "Expose it on the wrapper or ensure model.network.preprocess exists."
+                )
+            tensors = preprocess(tensors)
+
         # Model already returns total energy in ASE units
         E = self.model(tensors)
 
@@ -63,34 +92,64 @@ class TorchPiNNCalc(Calculator):
             raise ValueError(
                 f"Calculator expects one structure energy; got shape {tuple(E.shape)}"
             )
+        # --- Forces AND TF-faithful stress via autograd ---
+        # Important: we need tensors["diff"] and tensors["ind_2"] which are created inside the model's preprocess.
+        diff = tensors.get("diff", None)
+        if np.any(atoms.get_pbc()):
+            if diff is None:
+                raise RuntimeError(
+                    "PBC stress requires tensors['diff'] (pair displacements). "
+                    "Your model/preprocess must populate it."
+                )
 
-        # Forces via autograd
-        dE_dR = torch.autograd.grad(E.sum(), coord, create_graph=False)[0]
+            # Get gradients wrt coord and diff in one autograd call.
+            dE_dR, dE_ddiff = torch.autograd.grad(
+                E.sum(),
+                [coord, diff],
+                create_graph=False,
+                retain_graph=False,
+            )
+        else:
+            # Non-PBC: only forces needed
+            dE_dR = torch.autograd.grad(E.sum(), coord, create_graph=False)[0]
+            dE_ddiff = None
+
         F = -dE_dR
-
         self.results["energy"] = float(E.item())
         self.results["forces"] = F.detach().cpu().numpy()
 
-        # Simple virial-based stress (same convention you already used)
+        # --- Stress (TF ground truth): sum_over_pairs(diff ⊗ dE/diff) / det(cell) ---
         if np.any(atoms.get_pbc()):
-            V = atoms.get_volume()
-            F_np = self.results["forces"]
-            virial = np.einsum("ni,nj->ij", R_np, F_np)
-            stress_tensor = -virial / V
+            cell = tensors["cell"]                     # (3,3) torch tensor
+            V = torch.det(cell).abs()                  # det(cell) like TF
+            ind_2 = tensors.get("ind_2", None)
+            ind_1 = tensors.get("ind_1", None)
+            if ind_2 is None or ind_1 is None:
+                raise RuntimeError("PBC stress requires tensors['ind_2'] and tensors['ind_1'].")
 
+            # structure id per atom (batch index); in your calc it's all zeros, but keep generic
+            batch = (ind_1[:, 0] if ind_1.ndim == 2 else ind_1).long()
+            pair_to_batch = batch[ind_2[:, 0].long()]  # (n_pairs,)
+
+            # outer product per pair: (n_pairs,3,3)
+            outer = diff.unsqueeze(2) * dE_ddiff.unsqueeze(1)
+
+            # sum per structure
+            n_struct = int(batch.max().item()) + 1 if batch.numel() else 1
+            stress = torch.zeros((n_struct, 3, 3), dtype=outer.dtype, device=outer.device)
+            stress.index_add_(0, pair_to_batch, outer)
+
+            stress = stress / V
+
+            # ASE 6-vector: [xx, yy, zz, yz, xz, xy]
+            s = stress[0].reshape(-1)  # row-major: [xx,xy,xz,yx,yy,yz,zx,zy,zz]
             self.results["stress"] = np.array(
-                [
-                    stress_tensor[0, 0],
-                    stress_tensor[1, 1],
-                    stress_tensor[2, 2],
-                    stress_tensor[1, 2],
-                    stress_tensor[0, 2],
-                    stress_tensor[0, 1],
-                ],
+                [s[0].item(), s[4].item(), s[8].item(), s[5].item(), s[2].item(), s[1].item()],
                 dtype=float,
             )
         else:
             self.results["stress"] = np.zeros(6, dtype=float)
+        
 
 
 def get_calc(model_spec, **kwargs):
