@@ -5,23 +5,48 @@ PyTorch translation of PiNet2 (rank=1 or rank=3), non-weighted PIX/Dot only.
 This mirrors the TensorFlow reference implementation documented at:
 https://teoroo-cmc.github.io/PiNN/master/usage/pinet2/
 
-Key pieces (rank=3 / P3):
-- d3 = diff / ||diff||
-- p3 initialized as zeros: (n_atoms, 3, 1)
-- InvarLayer produces:
-    p1 (per-atom invariant update) and i1 (per-pair invariant interaction)
-- EquivarLayer uses:
-    ix = PIXLayer([ind_2, p3])                       # broadcast atom->pair (j-side)
-    ix = ScaleLayer([ix, i1])                        # gate by scalar interaction
-    scaled_d3 = ScaleLayer([d3[:, :, None], i1])      # inject bond direction
-    ix = ix + scaled_d3
-    p3 = IP([ind_2, p3, ix])                         # scatter-add to i-side atoms
-    p3 = pp_layer(p3)                                # (no activation, no bias)
-    p3_dot = DotLayer(p3)                            # (n_atoms, n_channels)
+Key pieces (rank=3 / P3, non-weighted):
 
-Torch backend contract:
-- forward(tensors) returns per-atom energy contributions (N,) or (N,1).
-  Pooling to per-structure energy is handled by PiNetPotentialTorch.
+- d3: unit bond directions on pairs
+      d3 = diff / ||diff||                      # (n_pairs, 3)
+
+- p1: per-atom invariant properties
+      shape: (n_atoms, n_prop)
+
+- p3: per-atom equivariant (rank-3) properties
+      shape: (n_atoms, 3, n_chan)
+      initialized as zeros at network entry
+
+- InvarLayer produces two tensors:
+    * p1_new : per-atom invariant update
+              shape (n_atoms, n_prop')
+    * i_pair : per-pair invariant interaction channels
+              shape (n_pairs, n_i)
+
+  In rank=3, i_pair is split into two branches:
+    i_pair -> [i_pair_0, i_pair_3]
+  where i_pair_3 gates the equivariant (p3) update.
+
+- GCBlock (rank=3) logic mirrors TF PiNet2:
+    1) Split per-pair interaction channels:
+         i_pair -> [i_pair_0, i_pair_3]
+    2) Use i_pair_3 to gate equivariant update:
+         ix = PIX([ind_2, p3])
+         ix = Scale(ix, i_pair_3)
+         ix += Scale(d3[:, :, None], i_pair_3)
+         (optional) ix += Scale(t3[:, :, None], i_pair_3)
+    3) Scatter interactions back to atoms:
+         p3 = IP([ind_2, p3, ix])
+         p3 = PP_no_bias_no_act(p3)
+    4) Form invariant–equivariant coupling:
+         dotted_p3 = Dot(p3)                    # per-atom
+         concat([p1_new, dotted_p3])
+         -> pp_layer -> split -> [p1_next, p3_scale]
+    5) Rescale equivariant features:
+         p3_next = p3 * p3_scale[:, None, :]
+
+- Output heads accumulate per-atom energies; pooling to structures is handled
+  outside the network (PiNetPotentialTorch).
 """
 
 from __future__ import annotations
@@ -93,25 +118,41 @@ class IPLayerEqTorch(nn.Module):
     """Equivariant IP scatter-add over source atom index i (ind_2[:,0])."""
 
     def forward(self, ind_2: torch.Tensor, px: torch.Tensor, ix: torch.Tensor) -> torch.Tensor:
-        """
+        """Equivariant IP scatter-add over receiver atom index i (ind_2[:, 0]).
+
+        TF parity note:
+            TF IPLayer returns a tensor whose last dimension follows the interaction
+            tensor (ix), not the input atom tensor (px). This allows p3 to start with
+            1 channel and expand through gating.
+
         Args:
             ind_2: (n_pairs, 2) long, (i, j)
-            px:    (n_atoms, x, r) used for shape/device/dtype
-            ix:    (n_pairs, x, r) interactions to scatter onto i
+            px:    (n_atoms, x, C_old) used only for n_atoms / device / dtype
+            ix:    (n_pairs, x, C_new) interactions to scatter onto i
+
         Returns:
-            new_px: (n_atoms, x, r)
+            out:   (n_atoms, x, C_new)
         """
         if ind_2.dtype != torch.long:
             ind_2 = ind_2.long()
+
+        n_atoms = int(px.shape[0])
+        x_dim = int(ix.shape[1])
+        c_dim = int(ix.shape[2])
+
+        out = torch.zeros((n_atoms, x_dim, c_dim), dtype=ix.dtype, device=ix.device)
+
+        # Empty edge list is valid (e.g., tiny system or very small cutoff)
+        if ix.numel() == 0:
+            return out
+
         i = ind_2[:, 0]
-        out = torch.zeros_like(px)
         out.index_add_(0, i, ix)
         return out
 
 
 class InvarLayerTorch(nn.Module):
-    """Invariant layer in PiNet2: produces (p1, i1)."""
-
+    """Invariant layer in PiNet2: produces (p1_new, i_pair)."""
     def __init__(
         self,
         *,
@@ -121,54 +162,79 @@ class InvarLayerTorch(nn.Module):
         n_basis: int,
         activation: Optional[Union[str, Callable[[torch.Tensor], torch.Tensor]]] = "tanh",
     ) -> None:
+        """Initialize invariant block.
+
+        Args:
+            pp_nodes: MLP widths for per-atom preprocessing and postprocessing of p1.
+            pi_nodes: MLP widths for pair interaction features.
+            ii_nodes: MLP widths for pair interaction mixing.
+            n_basis:  number of radial basis functions.
+            activation: activation function name/callable.
+        """
         super().__init__()
+
         self.pp_pre = FFLayerTorch(pp_nodes, activation=activation, use_bias=True) if len(pp_nodes) else nn.Identity()
         self.pi = PILayerTorch(pi_nodes, n_basis=int(n_basis), activation=activation, use_bias=True)
         self.ii = FFLayerTorch(ii_nodes, activation=activation, use_bias=False)
         self.ip = IPLayerTorch()
-        # TF InvarLayer uses a biasless/no-activation PP at the end
-        self.pp_post = FFLayerTorch(pp_nodes, activation=None, use_bias=False) if len(pp_nodes) else nn.Identity()
+        # TF InvarLayer uses a biasless PP at the end (activation is still applied)
+        self.pp_post = FFLayerTorch(pp_nodes, activation=activation, use_bias=False) if len(pp_nodes) else nn.Identity()
 
     def forward(
         self, *, ind_2: torch.Tensor, p1: torch.Tensor, basis: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
+        """Compute invariant update.
+
         Args:
             ind_2: (n_pairs, 2)
             p1:    (n_atoms, n_prop)
             basis: (n_pairs, n_basis)
+
         Returns:
             p1_new: (n_atoms, n_prop')
-            i1:     (n_pairs, n_outs)  (invariant interaction channels)
+            i_pair: (n_pairs, n_i) pair-wise invariant interaction channels
         """
         p1_in = self.pp_pre(p1) if not isinstance(self.pp_pre, nn.Identity) else p1
-        i1 = self.pi(ind_2, p1_in, basis)
-        i1 = self.ii(i1)
-        p1_new = self.ip(ind_2, p1_in, i1)
+
+        # Pair-wise interaction channels
+        i_pair = self.pi(ind_2, p1_in, basis)
+        i_pair = self.ii(i_pair)
+
+        # Updated atom features
+        p1_new = self.ip(ind_2, p1_in, i_pair)
         p1_new = self.pp_post(p1_new) if not isinstance(self.pp_post, nn.Identity) else p1_new
-        return p1_new, i1
+
+        return p1_new, i_pair
     
-
-
 class EquivarLayerTorch(nn.Module):
-    """Equivariant (rank=3) layer in PiNet2: produces (p3, dotted_p3)."""
+    """Equivariant (rank=3) layer in PiNet2: produces (p3, dotted_p3).
+
+    Faithful TF behavior:
+      ix = PIX([ind_2, p3])
+      ix = Scale([ix, i1])
+      ix += Scale([d3[:, :, None], i1])
+      p3 = IP([ind_2, p3, ix])
+      p3 = PP_no_bias_no_act(p3)
+      dotted = Dot(p3)
+    """
 
     def __init__(
         self,
         *,
         pp_nodes: Sequence[int],
-        n_outs: int,
-        activation: Optional[Union[str, Callable[[torch.Tensor], torch.Tensor]]] = "tanh",
+        torsion_boost: bool = False,
     ) -> None:
         super().__init__()
-        self._i1_proj = None  # created lazily to map i1 -> px_channels
+        self.torsion_boost = bool(torsion_boost)
         self.pix = PIXLayerTorch()
         self.scale = ScaleLayerTorch()
         self.ip = IPLayerEqTorch()
-        # TF EquivarLayer uses an activation MLP on interactions, but NO activation/bias in pp
-        self.ii = FFLayerTorch([int(n_outs)], activation=activation, use_bias=True)
+
+        # TF EquivarLayer uses activation=None and use_bias=False in its PP stage.
         self.pp = FFLayerTorch(pp_nodes, activation=None, use_bias=False) if len(pp_nodes) else nn.Identity()
         self.dot = DotLayerTorch()
+
+        # activation is kept in signature to stay API-compatible, but not used here (TF defines ii_layer but doesn't use it).
 
     def forward(
         self,
@@ -177,45 +243,39 @@ class EquivarLayerTorch(nn.Module):
         p3: torch.Tensor,
         i1: torch.Tensor,
         d3: torch.Tensor,
+        t3: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
+        """Compute updated p3 and dotted(p3).
+
         Args:
-            ind_2: (n_pairs,2)
-            p3:    (n_atoms,3,r)
-            i1:    (n_pairs,r)  invariant interaction channels
-            d3:    (n_pairs,3)  unit bond directions
+            ind_2: (n_pairs, 2) long, (i, j)
+            p3:    (n_atoms, 3, C_in) equivariant features on atoms
+            i1:    (n_pairs, C_in) pair-wise gate (rank-3 branch)
+            d3:    (n_pairs, 3) unit bond directions
+            t3:    optional (n_pairs, 3) perpendicular unit vector for torsion_boost
+
         Returns:
-            p3_new:     (n_atoms,3,r)
-            dotted_p3:  (n_atoms,r)
+            p3_new: (n_atoms, 3, C_out) updated equivariant features
+            dotted: (n_atoms, C_out) dot-product summary of p3_new
         """
-        # # Gate network on invariant edge features
-        i1g = self.ii(i1)  # (n_pairs, r)
 
-        # Ensure gate has same channel count as p3 (r)
-        i1g = self._project_i1(i1g, out_dim=p3.shape[-1])        
+        ix = self.pix(ind_2, p3)
+        ix = self.scale(ix, i1)
+        ix = ix + self.scale(d3[:, :, None], i1)
 
-        ix = self.pix(ind_2, p3)              # (n_pairs,3,r)
-        ix = self.scale(ix, i1g)              # gate by scalar channels
-        scaled_d3 = self.scale(d3[:, :, None], i1g)  # (n_pairs,3,r)
-        ix = ix + scaled_d3
+        if self.torsion_boost:
+            if t3 is None:
+                raise ValueError("torsion_boost=True requires t3 (per-pair perpendicular unit vector).")
+            ix = ix + self.scale(t3[:, :, None], i1)
 
         p3_new = self.ip(ind_2, p3, ix)
         p3_new = self.pp(p3_new) if not isinstance(self.pp, nn.Identity) else p3_new
         dotted = self.dot(p3_new)
         return p3_new, dotted
-    
-    def _project_i1(self, i1: torch.Tensor, out_dim: int) -> torch.Tensor:
-        """Project i1 last-dim to out_dim (created lazily on first use)."""
-        if i1.shape[-1] == out_dim:
-            return i1
-        if self._i1_proj is None or self._i1_proj.in_features != int(i1.shape[-1]) or self._i1_proj.out_features != int(out_dim):
-            self._i1_proj = nn.Linear(int(i1.shape[-1]), int(out_dim), bias=True).to(device=i1.device, dtype=i1.dtype)
-            self.add_module("i1_proj", self._i1_proj)
-        return self._i1_proj(i1)
 
 
 class GCBlock2Torch(nn.Module):
-    """One PiNet2 GCBlock: computes new_tensors dict like TF GCBlock.call()."""
+    """One PiNet2 GCBlock faithful to TF GCBlock.call() for rank=3 (non-weighted)."""
 
     def __init__(
         self,
@@ -226,31 +286,74 @@ class GCBlock2Torch(nn.Module):
         ii_nodes: Sequence[int],
         n_basis: int,
         activation: str,
+        torsion_boost: bool = False,
     ) -> None:
         super().__init__()
         self.rank = int(rank)
-        self.invar = InvarLayerTorch(
-            pp_nodes=pp_nodes, pi_nodes=pi_nodes, ii_nodes=ii_nodes, n_basis=n_basis, activation=activation
+        self.n_props = int(self.rank // 2) + 1  # rank=3 -> 2 branches
+
+        if len(ii_nodes) == 0 or len(pp_nodes) == 0:
+            raise ValueError("ii_nodes and pp_nodes must be non-empty for PiNet2 GCBlock")
+
+        # TF:
+        #   ii1_nodes[-1] *= n_props
+        #   pp1_nodes[-1]  = pp_nodes[-1] * n_props
+        ii1_nodes = list(ii_nodes)
+        pp1_nodes = list(pp_nodes)
+
+        ii1_nodes[-1] = int(ii1_nodes[-1]) * int(self.n_props)
+        pp1_nodes[-1] = int(ii_nodes[-1]) * int(self.n_props)
+
+        self.invar_p1_layer = InvarLayerTorch(
+            pp_nodes=pp_nodes,
+            pi_nodes=pi_nodes,
+            ii_nodes=ii1_nodes,
+            n_basis=n_basis,
+            activation=activation,
         )
+
+        self.pp_layer = FFLayerTorch(pp1_nodes, activation=activation, use_bias=True)
+
         if self.rank >= 3:
-            self.equivar3 = EquivarLayerTorch(pp_nodes=pp_nodes, n_outs=int(ii_nodes[-1]), activation=activation)
+            ppx_nodes = [int(pp_nodes[-1])]
+            self.equivar_p3_layer = EquivarLayerTorch(
+                pp_nodes=ppx_nodes,
+                torsion_boost=bool(torsion_boost),
+            )
+            self.scale3_layer = ScaleLayerTorch()
 
     def forward(self, tensors: Dict[str, torch.Tensor], basis: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Args:
-            tensors: must contain p1, ind_2, d3 and (if rank>=3) p3
-            basis:   (n_pairs, n_basis)
-        Returns:
-            new_tensors with at least {"p1": ...} and (if rank>=3) {"p3": ...}
-        """
+        """Compute new tensors dict (p1 and p3) matching TF GCBlock output (rank=3)."""
         ind_2 = tensors["ind_2"]
-        p1_new, i1 = self.invar(ind_2=ind_2, p1=tensors["p1"], basis=basis)
 
-        out: Dict[str, torch.Tensor] = {"p1": p1_new}
+        # 1) Invariant stage: per-atom update and per-pair interaction channels
+        p1, i_pair = self.invar_p1_layer(ind_2=ind_2, p1=tensors["p1"], basis=basis)
 
+        # 2) Split pair-wise interaction channels into branches (rank=3 -> 2 branches)
+        i1s = torch.chunk(i_pair, chunks=self.n_props, dim=-1)
+
+        px_list = [p1]
+
+        # 3) Rank-3 equivariant stage gated by pair-wise branch i1s[1]
         if self.rank >= 3:
-            p3_new, _dotted = self.equivar3(ind_2=ind_2, p3=tensors["p3"], i1=i1, d3=tensors["d3"])
-            out["p3"] = p3_new
+            p3, dotted_p3 = self.equivar_p3_layer(
+                ind_2=ind_2,
+                p3=tensors["p3"],
+                i1=i1s[1],
+                d3=tensors["d3"],
+                t3=tensors.get("t3", None),
+            )
+            px_list.append(dotted_p3)
+
+        # 4) Second invariant mixing (per-atom): concat([p1, dotted_p3]) -> pp_layer -> split
+        p1t1 = self.pp_layer(torch.cat(px_list, dim=-1))
+        pxt1 = torch.chunk(p1t1, chunks=self.n_props, dim=-1)
+
+        out: Dict[str, torch.Tensor] = {"p1": pxt1[0]}
+
+        # 5) Scale p3 by per-atom pxt1[1]
+        if self.rank >= 3:
+            out["p3"] = self.scale3_layer(p3, pxt1[1])
 
         return out
 
@@ -293,6 +396,8 @@ class PiNet2Torch(nn.Module):
         else:
             raise ValueError(f"Unknown basis_type={basis_type!r}")
 
+        torsion_boost = bool(self.params.get("torsion_boost", False))
+
         self.gc_blocks = nn.ModuleList(
             [
                 GCBlock2Torch(
@@ -302,10 +407,12 @@ class PiNet2Torch(nn.Module):
                     ii_nodes=ii_nodes,
                     n_basis=n_basis,
                     activation=str(act),
+                    torsion_boost=torsion_boost,
                 )
                 for _ in range(self.depth)
             ]
         )
+        self.torsion_boost = torsion_boost
         self.out_layers = nn.ModuleList(
             [OutLayerTorch(out_nodes, out_units, activation=str(act), use_bias=True) for _ in range(self.depth)]
         )
@@ -333,7 +440,11 @@ class PiNet2Torch(nn.Module):
         # Init equivariants
         n_atoms = int(tensors["ind_1"].shape[0])
         if self.rank >= 3 and "p3" not in tensors:
-            tensors["p3"] = torch.zeros((n_atoms, 3, 1), dtype=tensors["coord"].dtype, device=tensors["coord"].device)
+            tensors["p3"] = torch.zeros(
+                (n_atoms, 3, 1),
+                dtype=tensors["coord"].dtype,
+                device=tensors["coord"].device,
+            )
 
         # Basis
         fc = self.cutoff(tensors["dist"])

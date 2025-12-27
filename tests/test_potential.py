@@ -78,6 +78,34 @@ def test_pinet2_p3_potential(backend, tmp_path, monkeypatch):
     _potential_tests(params)
 
 @pytest.mark.forked
+def test_pinet2_p3_potential_torsion_boost(tmp_path, monkeypatch):
+    """Same as test_pinet2_p3_potential but with torsion_boost enabled (torch-only)."""
+    monkeypatch.setenv("PINN_BACKEND", "torch")
+    testpath = tmp_path / "torch_torsion_boost"
+
+    network_params = {
+        "ii_nodes": [8, 8],
+        "pi_nodes": [8, 8],
+        "pp_nodes": [8, 8],
+        "out_nodes": [8, 8],
+        "depth": 3,
+        "rc": 5.0,
+        "n_basis": 5,
+        "atom_types": [1],
+        "rank": 3,
+        "torsion_boost": True,
+    }
+    params = {
+        "model_dir": str(testpath),
+        "network": {"name": "PiNet2", "params": network_params},
+        "model": {
+            "name": "potential_model",
+            "params": {"use_force": True, "e_dress": {1: 0.5}, "e_scale": 5.0, "e_unit": 2.0},
+        },
+    }
+    _potential_tests(params)
+
+@pytest.mark.forked
 def test_pinet2_p5_potential():
     testpath = tempfile.mkdtemp()
     network_params = {
@@ -219,6 +247,34 @@ def _potential_tests(params):
     backend = os.environ.get("PINN_BACKEND", "tf").lower()
     print("PINN_BACKEND seen by _potential_tests:", backend)
     model = pinn.get_model(params)
+
+        # --- NEW: hard check that torsion_boost is not silently ignored (torch only) ---
+    tb = params.get("network", {}).get("params", {}).get("torsion_boost", False)
+    if backend == "torch" and tb:
+        import torch
+
+        # Grab the underlying torch network module (name differs across wrappers)
+        net = getattr(model, "network", None) or getattr(model, "net", None) or getattr(model, "module", None)
+        assert net is not None, "Can't access underlying torch network from model (expected .network/.net/.module)."
+
+        assert getattr(net, "torsion_boost", False) is True, "torsion_boost flag did not reach PiNet2Torch."
+
+        # Force preprocess to run and verify it produces t3
+        assert hasattr(net, "preprocess"), "PiNet2Torch must expose preprocess() for this test."
+        sample = {
+            "coord": torch.tensor(data["coord"][:1], dtype=torch.float32),
+            "elems": torch.tensor(data["elems"][:1], dtype=torch.long),
+        }
+        tensors = net.preprocess(sample)
+        assert "t3" in tensors, "torsion_boost=True but preprocess did not create 't3'."
+
+        # Optional geometry sanity: t3 ⟂ d3 and ||t3|| = 1
+        t3 = tensors["t3"]
+        d3 = tensors["d3"]
+        dot = (t3 * d3).sum(dim=-1).abs().max().item()
+        assert dot < 1e-4, f"t3 not perpendicular to d3; max |dot|={dot}"
+        norm_err = (t3.pow(2).sum(dim=-1).sqrt() - 1).abs().max().item()
+        assert norm_err < 1e-4, f"t3 not unit length; max |norm-1|={norm_err}"
 
     if backend == "tf":
         train_spec = tf.estimator.TrainSpec(input_fn=train, max_steps=1e3)
