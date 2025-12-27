@@ -95,6 +95,13 @@ class TorchPiNNCalc(Calculator):
 
 def get_calc(model_spec, **kwargs):
     """Factory used by pinn.get_calc() for backend='torch'."""
+
+    # --- Special-case analytic LJ: no checkpoint, just return ASE's LJ calc ---
+    if model_spec.get("network", {}).get("name") == "LJ":
+        from ase.calculators.lj import LennardJones
+        rc = float(model_spec.get("network", {}).get("params", {}).get("rc", 3.0))
+        return LennardJones(rc=rc)
+
     model_dir = model_spec.get("model_dir", None)
     if model_dir is None:
         raise ValueError("Torch calculator requires model_spec['model_dir'].")
