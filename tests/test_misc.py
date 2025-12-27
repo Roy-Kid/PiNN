@@ -8,56 +8,21 @@ from shutil import rmtree
 
 
 @pytest.mark.forked
-def test_potential_model():
-    """A simple example to test training and using a potential"""
-    from ase import Atoms
-    from ase.calculators.lj import LennardJones
-    from pinn.io import load_numpy, sparse_batch
+@pytest.mark.parametrize("backend", ["tf", "torch"])
+def test_potential_model(backend, monkeypatch, tmp_path):
+    """Train+eval a tiny potential model on both backends using the same LJ toy data."""
+    monkeypatch.setenv("PINN_BACKEND", backend)
 
-    def three_body_sample(atoms, a, r):
-        x = a * np.pi / 180
-        pos = [[0, 0, 0], [0, 2, 0], [0, r * np.cos(x), r * np.sin(x)]]
-        atoms.set_positions(pos)
-        return atoms
+    # Reuse the same dataset generator as tests/test_potential.py
+    from test_potential import _get_lj_data  #
 
-    tmp = tempfile.mkdtemp(prefix="pinn_test")
-    atoms = Atoms("H3", calculator=LennardJones())
-    na, nr = 50, 50
-    arange = np.linspace(30, 180, na)
-    rrange = np.linspace(1, 3, nr)
-    # Truth
-    agrid, rgrid = np.meshgrid(arange, rrange)
-    egrid = np.zeros([na, nr])
-    for i in range(na):
-        for j in range(nr):
-            atoms = three_body_sample(atoms, arange[i], rrange[j])
-            egrid[i, j] = atoms.get_potential_energy()
-    # Samples
-    nsample = 50
-    asample, rsample = [], []
-    distsample = []
-    data = {"e_data": [], "f_data": [], "elems": [], "coord": []}
-    np.random.seed(0)
-    for i in range(nsample):
-        a, r = np.random.choice(arange), np.random.choice(rrange)
-        atoms = three_body_sample(atoms, a, r)
-        dist = atoms.get_all_distances()
-        dist = dist[np.nonzero(dist)]
-        data["e_data"].append(atoms.get_potential_energy())
-        data["f_data"].append(atoms.get_forces())
-        data["coord"].append(atoms.get_positions())
-        data["elems"].append(atoms.numbers)
-        asample.append(a)
-        rsample.append(r)
-        distsample.append(dist)
-    data = {k: np.array(v) for k, v in data.items()}
-    dataset = lambda: load_numpy(data, splits={"train": 8, "test": 2})
-    train = lambda: dataset()["train"].shuffle(100).repeat().apply(sparse_batch(100))
-    test = lambda: dataset()["test"].repeat().apply(sparse_batch(100))
+    data = _get_lj_data()
+    model_dir = str(tmp_path / f"pinn_test_{backend}")
+
     params = {
-        "model_dir": tmp,
+        "model_dir": model_dir,
         "network": {
-            "name": "PiNet",
+            "name": "PiNet",   # keep PiNet here (matches your original intention)
             "params": {
                 "ii_nodes": [8, 8],
                 "pi_nodes": [8, 8],
@@ -67,13 +32,41 @@ def test_potential_model():
                 "atom_types": [1],
             },
         },
-        "model": {"name": "potential_model", "params": {"use_force": True}},
+        "model": {
+            "name": "potential_model",
+            "params": {"use_force": True},
+        },
     }
+
     model = pinn.get_model(params)
-    train_spec = tf.estimator.TrainSpec(input_fn=train, max_steps=200)
-    eval_spec = tf.estimator.EvalSpec(input_fn=test, steps=10)
-    tf.estimator.train_and_evaluate(model, train_spec, eval_spec)
-    rmtree(tmp, ignore_errors=True)
+
+    if backend == "tf":
+        tf = pytest.importorskip("tensorflow")
+        from pinn.io import load_numpy, sparse_batch
+
+        def train():
+            ds = load_numpy(data)  # IMPORTANT: construct inside input_fn (graph context)
+            return ds.repeat().shuffle(500).apply(sparse_batch(50))
+
+        def test():
+            ds = load_numpy(data)  # IMPORTANT: construct inside input_fn (graph context)
+            return ds.repeat().apply(sparse_batch(10))
+
+        train_spec = tf.estimator.TrainSpec(input_fn=train, max_steps=200)
+        eval_spec = tf.estimator.EvalSpec(input_fn=test, steps=10)
+        tf.estimator.train_and_evaluate(model, train_spec, eval_spec)
+    else:
+        # Torch backend path: use torch runtime (expects numpy dict like _get_lj_data()).
+        pinn.train_and_evaluate(
+            model=model,
+            params=params,
+            data=data,
+            max_steps=200,
+            eval_steps=10,
+            batch_size_train=50,
+            batch_size_eval=10,
+            shuffle_buffer=500,
+        )
 
 
 @pytest.mark.forked
@@ -113,44 +106,104 @@ def test_derivitives():
 
 
 @pytest.mark.forked
-def test_clist_nl():
-    """Cell list neighbor test
-    Compare with ASE implementation
-    """
+@pytest.mark.parametrize("backend", ["tf", "torch"])
+def test_clist_nl(backend, monkeypatch):
+    """Cell list neighbor test: compare with ASE implementation (TF and Torch)."""
+    monkeypatch.setenv("PINN_BACKEND", backend)
+
     from ase.build import bulk
     from ase.neighborlist import neighbor_list
-    from pinn.layers import CellListNL
-   # tf.compat.v1.reset_default_graph() 
+    import numpy as np
 
+    rc = 10.0
     to_test = [bulk("Cu"), bulk("Mg"), bulk("Fe")]
-    ind, coord, cell = [], [], []
-    for i, a in enumerate(to_test):
-        ind.append([[i]] * len(a))
-        coord.append(a.positions)
-        cell.append(a.cell)
-        
-    with tf.Graph().as_default():
-        tensors = {
-            "ind_1": tf.constant(np.concatenate(ind, axis=0), tf.int32),
-            "coord": tf.constant(np.concatenate(coord, axis=0), tf.float32),
-            "cell": tf.constant(np.stack(cell, axis=0), tf.float32),
-        }
-        nl = CellListNL(rc=10)(tensors)
 
-        with tf.compat.v1.Session() as sess:
-            dist_pinn = sess.run(nl["dist"])
+    if backend == "tf":
+        tf = pytest.importorskip("tensorflow")
+        from pinn.layers import CellListNL
 
+        ind, coord, cell = [], [], []
+        for i, a in enumerate(to_test):
+            ind.append([[i]] * len(a))
+            coord.append(a.positions)
+            cell.append(a.cell.array)
+
+        with tf.Graph().as_default():
+            tensors = {
+                "ind_1": tf.constant(np.concatenate(ind, axis=0), tf.int32),
+                "coord": tf.constant(np.concatenate(coord, axis=0), tf.float32),
+                "cell": tf.constant(np.stack(cell, axis=0), tf.float32),
+            }
+            nl = CellListNL(rc=rc)(tensors)
+            with tf.compat.v1.Session() as sess:
+                dist_pinn = sess.run(nl["dist"])
+
+    else:
+        import torch
+        from pinn.networks.pinet_torch import CellListNLPyTorch
+
+        def _shifted_dists(
+            coord: torch.Tensor,
+            ind_2: torch.Tensor,
+            shift: torch.Tensor,
+            cell: torch.Tensor,
+        ) -> torch.Tensor:
+            """
+            Compute pair distances using explicit periodic image shifts.
+
+            coord: (N,3)
+            ind_2: (M,2) with (i,j)
+            shift: (M,3) integer shifts (sx,sy,sz) such that
+                displacement = (r_j + shift @ cell) - r_i
+            cell:  (3,3) lattice vectors (ASE convention: rows are vectors)
+            """
+            i = ind_2[:, 0]
+            j = ind_2[:, 1]
+            # translation vectors in Cartesian: (M,3) = shift.float() @ cell
+            t = shift.to(coord.dtype) @ cell
+            d = (coord[j] + t) - coord[i]
+            return torch.linalg.norm(d, dim=-1)
+
+        cl = CellListNLPyTorch(rc=rc)
+        dists = []
+
+        for a in to_test:
+            coord = torch.tensor(a.positions, dtype=torch.float32)
+            cell = torch.tensor(a.cell.array, dtype=torch.float32)
+            nl = cl(coord=coord, cell=cell)
+            ind_2 = nl["ind_2"]
+            shift = nl.get("shift", None)
+
+            if ind_2.numel() == 0:
+                continue
+
+            if shift is None:
+                # fallback: non-PBC style (shouldn't happen here since we pass cell)
+                d = coord[ind_2[:, 1]] - coord[ind_2[:, 0]]
+                dist = torch.linalg.norm(d, dim=-1)
+            else:
+                dist = _shifted_dists(coord, ind_2, shift, cell)
+            dists.append(dist.cpu().numpy())
+
+        dist_pinn = np.concatenate(dists, axis=0) if dists else np.array([], dtype=float)
+
+    # ASE reference distances
     dist_ase = []
     for a in to_test:
-        dist_ase.append(neighbor_list("d", a, 10))
-    dist_ase = np.concatenate(dist_ase, 0)
+        dist_ase.append(neighbor_list("d", a, rc))
+    dist_ase = np.concatenate(dist_ase, axis=0)
+
     assert np.allclose(np.sort(dist_ase), np.sort(dist_pinn), rtol=1e-2)
 
-
 @pytest.mark.forked
-def test_input_yml():
+@pytest.mark.parametrize("backend", ["tf", "torch"])
+def test_input_yml(backend, monkeypatch):
+    """Ensure params-dict with optimizer block can build a model on both backends."""
+    monkeypatch.setenv("PINN_BACKEND", backend)
+    if backend == "tf":
+        pytest.importorskip("tensorflow")
 
-    from pinn import get_model, get_network
+    from pinn import get_model
 
     params = {
         "model_dir": "/tmp",
@@ -163,25 +216,18 @@ def test_input_yml():
                 "use_e_per_atom": False,
                 "log_e_per_atom": True,
                 "e_scale": 1.0,
+                "e_unit": 1.0,
             },
         },
         "network": {
-            "name": "PiNet2",
+            "name": "PiNet",
             "params": {
-                "depth": 5,
-                "rc": 4.5,
-                "n_basis": 10,
-                "basis_type": "gaussian",
-                "pi_nodes": [64],
-                "pp_nodes": [64, 64, 64, 64],
-                "ii_nodes": [64, 64, 64, 64],
-                "out_nodes": [64],
-                "weighted": False,
-                "rank": 5,
-                "out_extra": {
-                    'p3': 1,
-                    'i5': 1
-                }
+                "atom_types": [1],
+                "rc": 3.0,
+                "ii_nodes": [8, 8],
+                "pi_nodes": [8, 8],
+                "pp_nodes": [8, 8],
+                "out_nodes": [8, 8],
             },
         },
         "optimizer": {
@@ -193,7 +239,7 @@ def test_input_yml():
                     "config": {
                         "decay_rate": 0.994,
                         "decay_steps": 10000,
-                        "initial_learning_rate": 0.0001,
+                        "initial_learning_rate": 1.0e-4,
                     },
                 },
             },

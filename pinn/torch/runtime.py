@@ -3,6 +3,34 @@ import os
 import numpy as np
 import torch
 from typing import Dict, Iterator
+from pinn.torch.optim import build_optimizer_from_params, apply_grad_clipping
+
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class PotentialLossConfig:
+    """Loss + reporting configuration for potential_model training."""
+    e_unit: float = 1.0
+    e_scale: float = 1.0
+    e_loss_multiplier: float = 1.0
+    f_loss_multiplier: float = 1.0
+    use_force: bool = True
+    use_e_per_atom: bool = False
+    log_e_per_atom: bool = False  # affects metrics/reporting only
+
+def _get_potential_loss_config(params: dict) -> PotentialLossConfig:
+    """Parse potential_model training knobs from params dict with safe defaults."""
+    mp = params.get("model", {}).get("params", {}) or {}
+    return PotentialLossConfig(
+        e_unit=float(mp.get("e_unit", 1.0)),
+        e_scale=float(mp.get("e_scale", 1.0)),
+        e_loss_multiplier=float(mp.get("e_loss_multiplier", 1.0)),
+        f_loss_multiplier=float(mp.get("f_loss_multiplier", 1.0)),
+        use_force=bool(mp.get("use_force", True)),
+        use_e_per_atom=bool(mp.get("use_e_per_atom", False)),
+        log_e_per_atom=bool(mp.get("log_e_per_atom", False)),
+    )
+
 
 def _make_sparse_batch(
     batch: Dict[str, np.ndarray],
@@ -128,6 +156,8 @@ def train_and_evaluate(
 
         METRICS/E_RMSE = e_scale * RMSE( E_pred/e_unit - e_data )
         METRICS/F_RMSE = e_scale * RMSE( F_pred/e_unit - f_data )
+        
+        If use_force is False, METRICS/F_RMSE is reported as 0.0 (Torch behavior).
 
     Parameters
     ----------
@@ -145,8 +175,7 @@ def train_and_evaluate(
         Training batch size.
     batch_size_eval : int
         Eval batch size.
-    lr : float
-        Learning rate.
+    lr : float Default learning rate used only if params['optimizer'] is absent.
     seed : int
         RNG seed.
     device : str
@@ -157,9 +186,9 @@ def train_and_evaluate(
     dict
         Metrics dict with keys 'METRICS/E_RMSE' and 'METRICS/F_RMSE'.
     """
-    mp = params.get("model", {}).get("params", {})
-    e_unit = float(mp.get("e_unit", 1.0))
-    e_scale = float(mp.get("e_scale", 1.0))
+    cfg = _get_potential_loss_config(params)
+    e_unit = cfg.e_unit
+    e_scale = cfg.e_scale
 
     model_dir = params.get("model_dir", None)
     if model_dir is None:
@@ -170,12 +199,9 @@ def train_and_evaluate(
     if hasattr(model, "to"):
         model = model.to(device)
 
-    # Optimizer (once you have parameters)
-    optim = None
-    if hasattr(model, "parameters"):
-        params_list = list(model.parameters())
-        if params_list:
-            optim = torch.optim.Adam(params_list, lr=lr)
+    
+    # Optimizer/scheduler/clipping from params.yml-style optimizer spec (generic for all torch nets)
+    optim, scheduler, clip = build_optimizer_from_params(model, params, default_lr=lr)
 
     train_it = iter_batches(data, batch_size_train, shuffle=True, seed=seed, repeat=True)
     eval_it = iter_batches(data, batch_size_eval, shuffle=False, seed=seed, repeat=True)
@@ -203,24 +229,48 @@ def train_and_evaluate(
         if E_pred.ndim != 1:
             raise ValueError(f"Expected E_pred shape (B,), got {tuple(E_pred.shape)}")
 
-    # ---- forces via autograd ----
-        dE_dR = torch.autograd.grad(
+    #---- forces via autograd (only if needed) ----
+        if cfg.use_force:
+            dE_dR = torch.autograd.grad(
             E_pred.sum(),
             coord,
-            create_graph=True,     # force loss needs gradients w.r.t. model params
-            retain_graph=True,     # keep graph for the energy term's backward()
-        )[0]
-        F_pred = -dE_dR
+            create_graph=True,   # force loss needs gradients w.r.t. model params
+            retain_graph=True,   # keep graph for energy backward
+            )[0]
+            F_pred = -dE_dR
+        else:
+            F_pred = None  # type: ignore[assignment]
 
     # ---- loss (same convention as test) ----
-        e_err = (E_pred / e_unit) - E_true
-        f_err = (F_pred / e_unit) - F_true
-        loss = (e_err**2).mean() + (f_err**2).mean()
+        # ---- energy loss (optionally per-atom normalized) ----
+        if cfg.use_e_per_atom:
+            B = int(E_true.shape[0])
+            counts = torch.bincount(tensors["ind_1"][:, 0], minlength=B).to(E_true.dtype).clamp_min(1.0)
+            E_pred_used = E_pred / counts
+            E_true_used = E_true / counts
+        else:
+            E_pred_used = E_pred
+            E_true_used = E_true
+
+        e_err = (E_pred_used / e_unit) - E_true_used
+        e_loss = (e_err ** 2).mean()
+
+        # ---- force loss (optional) ----
+        if cfg.use_force:
+            f_err = (F_pred / e_unit) - F_true
+            f_loss = (f_err ** 2).mean()
+        else:
+            f_loss = torch.zeros((), dtype=e_loss.dtype, device=e_loss.device)
+
+        loss = cfg.e_loss_multiplier * e_loss + cfg.f_loss_multiplier * f_loss
 
         if optim is not None:
             optim.zero_grad(set_to_none=True)
             loss.backward()
+            apply_grad_clipping(model, clip)
             optim.step()
+            if scheduler is not None:
+                scheduler.step()
 
     # ---- evaluation loop (compute RMSE) ----
     if hasattr(model, "eval"):
@@ -243,20 +293,31 @@ def train_and_evaluate(
         coord = tensors["coord"]
 
         E_pred = model(tensors)
-        dE_dR = torch.autograd.grad(E_pred.sum(), coord, create_graph=False)[0]
-        F_pred = -dE_dR
 
-        e_err = (E_pred / e_unit) - E_true
-        f_err = (F_pred / e_unit) - F_true
+        # energy error for metrics
+        if cfg.log_e_per_atom:
+            B = int(E_true.shape[0])
+            counts = torch.bincount(tensors["ind_1"][:, 0], minlength=B).to(E_true.dtype).clamp_min(1.0)
+            e_err = ((E_pred / counts) / e_unit) - (E_true / counts)
+        else:
+            e_err = (E_pred / e_unit) - E_true
 
-        e_sq_sum += float((e_err**2).sum().item())
+        e_sq_sum += float((e_err ** 2).sum().item())
         e_count += int(e_err.numel())
 
-        f_sq_sum += float((f_err**2).sum().item())
-        f_count += int(f_err.numel())
+        # forces only if requested
+        if cfg.use_force:
+            dE_dR = torch.autograd.grad(E_pred.sum(), coord, create_graph=False)[0]
+            F_pred = -dE_dR
+            f_err = (F_pred / e_unit) - F_true
+            f_sq_sum += float((f_err ** 2).sum().item())
+            f_count += int(f_err.numel())
 
     e_rmse = float(np.sqrt(e_sq_sum / max(e_count, 1)))
-    f_rmse = float(np.sqrt(f_sq_sum / max(f_count, 1)))
+    if cfg.use_force:
+        f_rmse = float(np.sqrt(f_sq_sum / max(f_count, 1)))
+    else:
+        f_rmse = 0.0
 
     # Save checkpoint
     if hasattr(model, "state_dict"):
