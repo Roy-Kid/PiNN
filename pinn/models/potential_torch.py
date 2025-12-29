@@ -41,17 +41,17 @@ class PiNetPotentialTorch(nn.Module):
         return E
     
     def energy_and_forces(model: nn.Module, tensors: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compute total energy and forces via autograd.
+        """
+        Compute total energy and forces via autograd.
 
-    Args:
-        model: A torch.nn.Module that returns per-structure energies (n_struct,).
-        tensors: Input dict containing at least "coord" and "ind_1".
+        Args:
+            model: A torch.nn.Module that returns per-structure energies (n_struct,).
+            tensors: Input dict containing at least "coord" and "ind_1".
 
-    Returns:
-        E: (n_struct,) detached energy tensor.
-        F: (n_atoms, 3) detached force tensor, defined as -d(sum(E))/dcoord.
-    """
+        Returns:
+            E: (n_struct,) detached energy tensor.
+            F: (n_atoms, 3) detached force tensor, defined as -d(sum(E))/dcoord.
+        """
     coord = tensors["coord"].detach().clone().requires_grad_(True)
     tensors2 = {**tensors, "coord": coord}
 

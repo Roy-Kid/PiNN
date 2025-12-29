@@ -489,32 +489,33 @@ class AtomicOnehotTorch(nn.Module):
 
 
 class CutoffFuncTorch(nn.Module):
-    """
-    Cutoff function layer.
-
-    Mirrors pinn.layers.basis.CutoffFunc:
-      f1(r)  = 0.5 * (cos(pi*r/rc) + 1)
-      f2(r)  = (tanh(1-r/rc)/tanh(1))^3
-      hip(r) = cos(pi*r/(2*rc))^2
-    """
-
     def __init__(self, rc: float = 5.0, cutoff_type: str = "f1") -> None:
         super().__init__()
         self.rc = float(rc)
-        rc2 = (self.rc * self.rc)
         self.cutoff_type = str(cutoff_type).lower()
-        if self.cutoff_type not in {"f1", "f2", "hip"}:
-            raise ValueError(f"Unknown cutoff_type={cutoff_type!r}")
 
     def forward(self, dist: torch.Tensor) -> torch.Tensor:
-        """Return cutoff values with the same shape as dist."""
+        """
+        Smooth cutoff that is guaranteed to satisfy:
+          - fc(dist) = 0 for dist >= rc
+          - fc(dist) >= 0 for all dist
+        """
         rc = self.rc
+
+        # Clamp normalized distance into [0, 1] so f1 cannot "wiggle" for dist>rc.
+        x = (dist / rc).clamp(min=0.0, max=1.0)
+
         if self.cutoff_type == "f1":
-            return 0.5 * (torch.cos(torch.pi * dist / rc) + 1.0)
-        if self.cutoff_type == "f2":
-            return (torch.tanh(1.0 - dist / rc) / torch.tanh(torch.tensor(1.0, device=dist.device, dtype=dist.dtype))) ** 3
-        # hip
-        return torch.cos(torch.pi * dist / rc / 2.0) ** 2
+            fc = 0.5 * (torch.cos(torch.pi * x) + 1.0)   # in [0,1], exactly 0 at x=1
+        elif self.cutoff_type == "f2":
+            one = dist.new_tensor(1.0)
+            fc = (torch.tanh(1.0 - x) / torch.tanh(one)) ** 3
+        else:  # hip
+            fc = torch.cos(torch.pi * x / 2.0) ** 2
+
+        # Explicitly zero out any self edges / numerical junk at <=0 distance.
+        fc = torch.where(dist > 0.0, fc, dist.new_zeros(()).expand_as(fc))
+        return fc
 
 
 class PolynomialBasisTorch(nn.Module):
@@ -682,10 +683,21 @@ class PreprocessLayerTorch(nn.Module):
         super().__init__()
         self.rc = float(rc)
         self.embed = AtomicOnehotTorch(atom_types)
-        self.nl = CellListNLPyTorch(rc)
+
+        # Single NL builder at the true cutoff
+        self.nl = CellListNLPyTorch(self.rc)
     
     @torch.no_grad()
-    def _build_nl_celllist(self, ind_1: torch.Tensor, coord: torch.Tensor, cell) -> dict:
+    @torch.no_grad()
+    def _build_nl_celllist(
+        self,
+        ind_1: torch.Tensor,
+        coord: torch.Tensor,
+        cell,
+        *,
+        nl_builder: Optional[nn.Module] = None,
+    ) -> dict:
+        nl_builder = self.nl if nl_builder is None else nl_builder
         if ind_1.dtype != torch.long:
             ind_1 = ind_1.long()
         batch = ind_1[:, 0] if ind_1.ndim == 2 else ind_1
@@ -701,10 +713,10 @@ class PreprocessLayerTorch(nn.Module):
 
             coord_b = coord[idx]
             if cell is None:
-                nl_b = self.nl(coord_b, cell=None)
+                nl_b = nl_builder(coord_b, cell=None)
             else:
                 H = cell[b] if cell_is_per_struct else cell
-                nl_b = self.nl(coord_b, cell=H)
+                nl_b = nl_builder(coord_b, cell=H)
 
             ind_2_local = nl_b["ind_2"]
             if ind_2_local.numel() == 0:
@@ -861,7 +873,8 @@ class PreprocessLayerTorch(nn.Module):
 
         if "ind_2" not in out:
             cell = out.get("cell", None)
-            nl = self._build_nl_celllist(out["ind_1"], out["coord"], cell)
+            nl = self._build_nl_celllist(out["ind_1"], out["coord"], cell, nl_builder=self.nl)
+
             out.update(nl)  # now adds ind_2 AND shift
 
         if "diff" not in out or "dist" not in out:
@@ -883,54 +896,36 @@ class PreprocessLayerTorch(nn.Module):
         shift: Optional[torch.Tensor],
         ind_1: torch.Tensor,
     ):
-    
         i = ind_2[:, 0]
         j = ind_2[:, 1]
 
-        # Non-PBC or no shift info -> plain Cartesian
+        # No PBC info
         if cell is None or shift is None:
             diff = coord[j] - coord[i]
             dist = torch.linalg.norm(diff, dim=1)
             return diff, dist
 
-        # ---- 1) Wrap coordinates into primary cell (TF _wrap_coord semantics) ----
+        # PBC: use explicit image shifts; DO NOT wrap coords
         if cell.ndim == 2:
-            # Single cell for all atoms
-            H = cell.to(device=coord.device, dtype=coord.dtype)          # (3,3)
-            H_inv = torch.linalg.inv(H)                                  # (3,3)
-            frac = coord @ H_inv                                         # (N,3)
-            frac = frac - torch.floor(frac)                              # wrap into [0,1)
-            coord_w = frac @ H                                           # (N,3)
+            H = cell.to(device=coord.device, dtype=coord.dtype)     # (3,3)
+            t = shift.to(coord.dtype) @ H                           # (M,3)
+            diff = (coord[j] + t) - coord[i]
+            dist = torch.linalg.norm(diff, dim=1)
+            return diff, dist
 
-            # translation vectors for each pair
-            t = shift.to(coord.dtype) @ H                                # (M,3)
-
-        elif cell.ndim == 3:
-            # Per-structure cell; wrap each atom with its own cell
+        if cell.ndim == 3:
             if ind_1.dtype != torch.long:
                 ind_1 = ind_1.long()
-            batch = ind_1[:, 0] if ind_1.ndim == 2 else ind_1            # (N,)
+            batch = ind_1[:, 0] if ind_1.ndim == 2 else ind_1       # (N,)
 
-            H_atom = cell[batch].to(device=coord.device, dtype=coord.dtype)   # (N,3,3)
-            H_inv_atom = torch.linalg.inv(H_atom)                             # (N,3,3)
+            sid = batch[i]                                          # (M,)
+            H_pair = cell[sid].to(device=coord.device, dtype=coord.dtype)  # (M,3,3)
+            t = torch.einsum("mi,mij->mj", shift.to(coord.dtype), H_pair)  # (M,3)
+            diff = (coord[j] + t) - coord[i]
+            dist = torch.linalg.norm(diff, dim=1)
+            return diff, dist
 
-            # frac[n] = coord[n] @ inv(H_atom[n])
-            frac = torch.einsum("ni,nij->nj", coord, H_inv_atom)              # (N,3)
-            frac = frac - torch.floor(frac)                                   # wrap into [0,1)
-            coord_w = torch.einsum("ni,nij->nj", frac, H_atom)                # (N,3)
-
-            # For pair translations, choose cell by structure id of atom i (same struct as j)
-            sid = batch[i]                                                    # (M,)
-            H_pair = cell[sid].to(device=coord.device, dtype=coord.dtype)     # (M,3,3)
-            t = torch.einsum("mi,mij->mj", shift.to(coord.dtype), H_pair)     # (M,3)
-
-        else:
-            raise ValueError(f"Unexpected cell shape {tuple(cell.shape)}")
-
-        # ---- 2) Displacements and distances from wrapped coords + explicit image shift ----
-        diff = (coord_w[j] + t) - coord_w[i]
-        dist = torch.linalg.norm(diff, dim=1)
-        return diff, dist
+        raise ValueError(f"Unexpected cell shape {tuple(cell.shape)}")
 
 class PiNetTorch(nn.Module):
     """
@@ -1001,7 +996,9 @@ class PiNetTorch(nn.Module):
               - per-atom if out_pool is falsy
               - per-structure if out_pool is a pooling mode
         """
-        tensors = self.preprocess(tensors)
+        # At the top of forward()
+        if not tensors.get("_preprocessed", False):
+            tensors = self.preprocess(tensors)
         fc = self.cutoff(tensors["dist"])
         basis = self.basis_fn(tensors["dist"], fc=fc)
 

@@ -8,6 +8,46 @@ from ase.calculators.calculator import Calculator, all_changes
 
 from .model import get_model as build_model
 
+def _get_stress_mode(model) -> str:
+    mode = _find_attr_in_wrapped_model(model, "stress_mode", "diff")
+    return str(mode).lower()
+
+def _get_fd_eps(model) -> float:
+    return float(_find_attr_in_wrapped_model(model, "fd_eps", 1e-4))
+
+
+def _find_attr_in_wrapped_model(obj, attr: str, default=None):
+    """
+    Walk common wrapper attributes/children to find attr on the underlying torch network.
+    Returns default if not found.
+    """
+    seen = set()
+    stack = [obj]
+    while stack:
+        cur = stack.pop()
+        if cur is None or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+
+        if hasattr(cur, attr):
+            return getattr(cur, attr)
+
+        # common wrappers
+        for name in ("network", "net", "module", "model"):
+            nxt = getattr(cur, name, None)
+            if nxt is not None and nxt is not cur:
+                stack.append(nxt)
+
+        # torch module children
+        try:
+            import torch.nn as nn
+            if isinstance(cur, nn.Module):
+                stack.extend(list(cur.children()))
+        except Exception:
+            pass
+
+    return default
+
 
 def _find_preprocess(obj):
     """
@@ -38,10 +78,11 @@ class TorchPiNNCalc(Calculator):
 
     implemented_properties = ["energy", "forces", "stress"]
 
-    def __init__(self, model, *, device="cpu", **kwargs) -> None:
+    def __init__(self, model, *, device="cpu", virial_mode="diff", **kwargs):
         super().__init__(**kwargs)
         self.model = model.to(device)
         self.device = device
+        self.virial_mode = virial_mode
 
     def calculate(self, atoms=None, properties=("energy", "forces", "stress"), system_changes=all_changes):
         """Run torch model and populate ASE results dict.
@@ -51,36 +92,67 @@ class TorchPiNNCalc(Calculator):
         - Call model(tensors) -> energy per structure, shape (B,). Here B=1.
         - Forces from autograd: F = -dE/dR (R is tensors["coord"]).
         - Apply e_dress (in model energy units) then multiply by e_unit.
-    """
+        """
         super().calculate(atoms, properties, system_changes)
 
         R_np = atoms.get_positions().astype(np.float32)  # (N,3)
         Z_np = atoms.numbers.astype(np.int64)            # (N,)
         N = R_np.shape[0]
 
-        coord = torch.tensor(R_np, dtype=torch.float32, device=self.device).detach().clone().requires_grad_(True)
+        pbc = np.any(atoms.get_pbc())
+        need_stress = ("stress" in properties) and pbc
+
+     
+        torsion_boost = bool(_find_attr_in_wrapped_model(self.model, "torsion_boost", False))
+        stress_mode = _get_stress_mode(self.model)  # dist|diff|cell|fd (user-controlled)
+        fd_eps = _get_fd_eps(self.model)
+
+        # --- Build tensors ---
         elems = torch.tensor(Z_np, dtype=torch.long, device=self.device)
+        ind_1 = torch.zeros((N, 1), dtype=torch.long, device=self.device)
+
+        if pbc:
+            # Cell tensor (leaf only if we will use thermo stress)
+            cell = torch.tensor(atoms.cell.array, dtype=torch.float32, device=self.device)
+            if need_stress and torsion_boost:
+                cell = cell.detach().clone().requires_grad_(True)
+
+            # Fractional coordinates as leaf (kept fixed under scale_atoms=True)
+            frac = torch.tensor(
+                atoms.get_scaled_positions(wrap=False),
+                dtype=torch.float32,
+                device=self.device,
+            ).detach().clone().requires_grad_(True)
+
+            # Cartesian coords derived from frac and cell (DO NOT detach; must keep dependency on cell)
+            coord = frac @ cell
+        else:
+            cell = None
+            frac = None
+            coord = torch.tensor(R_np, dtype=torch.float32, device=self.device).detach().clone().requires_grad_(True)
 
         tensors = {
-            "coord": coord,  # (N,3) requires_grad=True
-            "elems": elems,  # (N,)
-            "ind_1": torch.zeros((N, 1), dtype=torch.long, device=self.device),  # one structure id = 0
+            "coord": coord,  # note: under PBC this is not a leaf, and that's OK
+            "elems": elems,
+            "ind_1": ind_1,
         }
+        if pbc:
+            tensors["cell"] = cell
 
-        # If PBC, pass cell (PiNetTorch preprocess will MIC-wrap neighborlist).
-        if np.any(atoms.get_pbc()):
-            tensors["cell"] = torch.tensor(atoms.cell.array, dtype=torch.float32, device=self.device)
-
-        need_stress = ("stress" in properties) and np.any(atoms.get_pbc())
-        # Only run preprocess if we need stress under PBC
-        if need_stress:
-            preprocess = _find_preprocess(self.model)
-            if preprocess is None:
-                raise RuntimeError(
-                    "PBC stress requested, but torch model does not expose preprocess(). "
-                    "Expose it on the wrapper or ensure model.network.preprocess exists."
-                )
+        preprocess = _find_preprocess(self.model)
+        if pbc and preprocess is not None:
+            coord0 = tensors["coord"]
+            cell0  = tensors["cell"]
+            # We need preprocess if:
+            # - stress_mode is dist/diff (needs dist/diff/ind_2)
+            # - stress_mode is cell/fd (energy still depends on neighbor features)
+            # In practice: preprocess once for all PBC paths.
             tensors = preprocess(tensors)
+            tensors["_preprocessed"] = True
+            # Identity checks: did preprocess replace the Tensor object?
+            assert tensors["coord"] is coord0, "preprocess overwrote coord"
+            assert tensors["cell"]  is cell0,  "preprocess overwrote cell"
+        
 
         # Model already returns total energy in ASE units
         E = self.model(tensors)
@@ -92,63 +164,150 @@ class TorchPiNNCalc(Calculator):
             raise ValueError(
                 f"Calculator expects one structure energy; got shape {tuple(E.shape)}"
             )
-        # --- Forces AND TF-faithful stress via autograd ---
-        # Important: we need tensors["diff"] and tensors["ind_2"] which are created inside the model's preprocess.
-        diff = tensors.get("diff", None)
-        if np.any(atoms.get_pbc()):
-            if diff is None:
-                raise RuntimeError(
-                    "PBC stress requires tensors['diff'] (pair displacements). "
-                    "Your model/preprocess must populate it."
-                )
-
-            # Get gradients wrt coord and diff in one autograd call.
-            dE_dR, dE_ddiff = torch.autograd.grad(
-                E.sum(),
-                [coord, diff],
+        # --- Forces from autograd on coordinates ---
+        if pbc:
+            (dE_dfrac,) = torch.autograd.grad(
+                E.sum(), frac,
                 create_graph=False,
-                retain_graph=False,
+                retain_graph=need_stress,
             )
+            inv_cell_T = torch.inverse(cell).transpose(0, 1)
+            dE_dR = dE_dfrac @ inv_cell_T
+            F = -dE_dR
+            assert torch.isfinite(dE_dfrac).all()
         else:
-            # Non-PBC: only forces needed
-            dE_dR = torch.autograd.grad(E.sum(), coord, create_graph=False)[0]
-            dE_ddiff = None
+            (dE_dR,) = torch.autograd.grad(
+                E.sum(), coord,
+                create_graph=False,
+                retain_graph=need_stress,
+            )
+            F = -dE_dR
+            assert torch.isfinite(dE_dR).all()
 
-        F = -dE_dR
         self.results["energy"] = float(E.item())
         self.results["forces"] = F.detach().cpu().numpy()
 
-        # --- Stress (TF ground truth): sum_over_pairs(diff ⊗ dE/diff) / det(cell) ---
-        if np.any(atoms.get_pbc()):
-            cell = tensors["cell"]                     # (3,3) torch tensor
-            V = torch.det(cell).abs()                  # det(cell) like TF
-            ind_2 = tensors.get("ind_2", None)
-            ind_1 = tensors.get("ind_1", None)
-            if ind_2 is None or ind_1 is None:
-                raise RuntimeError("PBC stress requires tensors['ind_2'] and tensors['ind_1'].")
+        # --- Stress (PBC only, if requested) ---
+        if need_stress:
+            diff = tensors.get("diff", None)   # (n_pairs,3)
+            dist = tensors.get("dist", None)   # (n_pairs,)
+            ind_2 = tensors.get("ind_2", None) # (n_pairs,2)
+            cell = tensors.get("cell", None)   # (3,3)
 
-            # structure id per atom (batch index); in your calc it's all zeros, but keep generic
-            batch = (ind_1[:, 0] if ind_1.ndim == 2 else ind_1).long()
-            pair_to_batch = batch[ind_2[:, 0].long()]  # (n_pairs,)
+            if cell is None:
+                raise RuntimeError("PBC stress requires tensors['cell'].")
 
-            # outer product per pair: (n_pairs,3,3)
-            outer = diff.unsqueeze(2) * dE_ddiff.unsqueeze(1)
+            V = torch.det(cell).abs().clamp_min(1e-12)
 
-            # sum per structure
-            n_struct = int(batch.max().item()) + 1 if batch.numel() else 1
-            stress = torch.zeros((n_struct, 3, 3), dtype=outer.dtype, device=outer.device)
-            stress.index_add_(0, pair_to_batch, outer)
+            def to_ase_stress6(sigma_3x3: torch.Tensor) -> np.ndarray:
+                # sigma row-major -> ASE Voigt [xx, yy, zz, yz, xz, xy]
+                s = sigma_3x3.reshape(-1)
+                return np.array(
+                    [s[0].item(), s[4].item(), s[8].item(), s[5].item(), s[2].item(), s[1].item()],
+                    dtype=float,
+                )
 
-            stress = stress / V
+            if stress_mode in ("dist", "diff"):
+                if diff is None or ind_2 is None:
+                    raise RuntimeError("dist/diff stress requires tensors['diff'] and tensors['ind_2'].")
 
-            # ASE 6-vector: [xx, yy, zz, yz, xz, xy]
-            s = stress[0].reshape(-1)  # row-major: [xx,xy,xz,yx,yy,yz,zx,zy,zz]
-            self.results["stress"] = np.array(
-                [s[0].item(), s[4].item(), s[8].item(), s[5].item(), s[2].item(), s[1].item()],
-                dtype=float,
-            )
-        else:
-            self.results["stress"] = np.zeros(6, dtype=float)
+                if stress_mode == "diff":
+                    dE_ddiff = torch.autograd.grad(E.sum(), diff, create_graph=False, retain_graph=False)[0]  # (n_pairs,3)
+                else:
+                    if dist is None:
+                        raise RuntimeError("dist stress requires tensors['dist'].")
+                    dE_ddist = torch.autograd.grad(E.sum(), dist, create_graph=False, retain_graph=False)[0]  # (n_pairs,)
+                    inv_r = dist.clamp_min(1e-12).reciprocal()
+                    dE_ddiff = dE_ddist.unsqueeze(-1) * diff * inv_r.unsqueeze(-1)  # chain rule
+
+                # Pair virial tensor contribution: outer(diff, dE_ddiff)
+                # Summing over directed pairs is fine if TF did the same; otherwise you may need 0.5.
+                outer = diff.unsqueeze(2) * dE_ddiff.unsqueeze(1)  # (n_pairs,3,3)
+                sigma = outer.sum(dim=0) / V                       # (3,3)
+                self.results["stress"] = to_ase_stress6(sigma)
+                return
+
+            if stress_mode == "cell":
+                # Full thermodynamic stress at fixed fractional coords:
+                # sigma = -(dE/dcell @ cell^T) / V
+                dE_dcell = torch.autograd.grad(E.sum(), cell, create_graph=False, retain_graph=False)[0]  # (3,3)
+                sigma = -(dE_dcell @ cell.transpose(0, 1)) / V
+                self.results["stress"] = to_ase_stress6(sigma)
+                return
+
+            if stress_mode == "fd":
+                # Finite-difference stress by small symmetric strain on cell (fractional coords fixed).
+                # sigma_ij = (1/V) * dE/dε_ij, ASE uses opposite sign convention for "pressure"
+                # so we follow the same sigma -> stress6 mapping as above.
+                eps = float(fd_eps)
+
+                # We need fractional coords as a leaf to keep them fixed:
+                frac = None
+                # Best effort: reconstruct from atoms each call
+                frac = torch.tensor(
+                    atoms.get_scaled_positions(wrap=False),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+
+                def energy_for_cell(cell_new: torch.Tensor) -> torch.Tensor:
+                    # Build tensors with fixed frac and new cell
+                    coord_new = frac @ cell_new
+                    t = {
+                        "coord": coord_new,
+                        "elems": elems,
+                        "ind_1": ind_1,
+                        "cell": cell_new,
+                    }
+                    preprocess = _find_preprocess(self.model)
+                    if preprocess is None:
+                        raise RuntimeError("fd stress requires preprocess().")
+                    t = preprocess(t)
+                    t["_preprocessed"] = True
+                    E_new = self.model(t)
+                    return E_new.view(-1).sum()
+
+                # Symmetric strain basis for Voigt order: xx, yy, zz, yz, xz, xy
+                # We perturb the cell by right-multiplying with (I + ε * S)
+                I = torch.eye(3, dtype=cell.dtype, device=cell.device)
+
+                S_list = []
+                # xx
+                S = torch.zeros_like(I); S[0, 0] = 1.0; S_list.append(S)
+                # yy
+                S = torch.zeros_like(I); S[1, 1] = 1.0; S_list.append(S)
+                # zz
+                S = torch.zeros_like(I); S[2, 2] = 1.0; S_list.append(S)
+                # yz
+                S = torch.zeros_like(I); S[1, 2] = 0.5; S[2, 1] = 0.5; S_list.append(S)
+                # xz
+                S = torch.zeros_like(I); S[0, 2] = 0.5; S[2, 0] = 0.5; S_list.append(S)
+                # xy
+                S = torch.zeros_like(I); S[0, 1] = 0.5; S[1, 0] = 0.5; S_list.append(S)
+
+                dE_dstrain = []
+                for S in S_list:
+                    cell_p = cell @ (I + eps * S)
+                    cell_m = cell @ (I - eps * S)
+                    Ep = energy_for_cell(cell_p)
+                    Em = energy_for_cell(cell_m)
+                    dE = (Ep - Em) / (2.0 * eps)
+                    dE_dstrain.append(dE)
+
+                # Assemble sigma in Voigt back to tensor (symmetric)
+                sxx, syy, szz, syz, sxz, sxy = dE_dstrain
+                sigma = torch.zeros((3, 3), dtype=cell.dtype, device=cell.device)
+                sigma[0, 0] = sxx / V
+                sigma[1, 1] = syy / V
+                sigma[2, 2] = szz / V
+                sigma[1, 2] = sigma[2, 1] = syz / V
+                sigma[0, 2] = sigma[2, 0] = sxz / V
+                sigma[0, 1] = sigma[1, 0] = sxy / V
+
+                self.results["stress"] = to_ase_stress6(sigma)
+                return
+
+            raise ValueError(f"Unknown stress_mode={stress_mode!r}")
         
 
 
@@ -185,4 +344,10 @@ def get_calc(model_spec, **kwargs):
 
     model.eval()
 
-    return TorchPiNNCalc(model, device=device, **kwargs)
+    virial_mode = (
+        model_spec.get("model", {})
+                .get("params", {})
+                .get("virial_mode", "diff")
+    )
+
+    return TorchPiNNCalc(model, device=device, virial_mode=virial_mode, **kwargs)
