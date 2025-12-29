@@ -1,27 +1,29 @@
 name: pinn
 channels:
   - pytorch
-  - nvidia
   - conda-forge
   - defaults
 dependencies:
   - python=3.9
   - pip
+
+  # Existing deps
   - "ase>=3.22.0,<3.23.0"
   - "click>=7.0,<8.0"
   - "pyyaml>=6.0.1,<6.1.0"
   - "numpy<2"
 
-  # Torch backend (CUDA)
+  # ADD: Torch backend (Apple Silicon uses MPS through this build)
   - pytorch
   - torchvision
   - torchaudio
-  - pytorch-cuda=11.8
 
-  # (Optional, but useful)
+  # (Optional but practical for your test workflow)
   - pytest
   - pytest-forked
 
   - pip:
-    - "tensorflow>=2.6,<=2.8"
+    # Existing TF backend pins (keep)
+    - tensorflow-macos==2.8.0
+    - tensorflow-metal==0.4.0
     - "protobuf<3.20"
