@@ -70,6 +70,56 @@ from pinn.networks.pinet_torch import (
 )
 
 
+def compute_torsion_boost_t3(
+    *,
+    ind_2: torch.Tensor,
+    d3: torch.Tensor,
+    n_atoms: int,
+    fc_edge: torch.Tensor,
+    eps: float = 1e-3,   # larger eps for float32 stability
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Returns:
+      t3:      (n_pairs,3) perpendicular direction, already damped near degeneracy
+      tb_gate: (n_pairs,1) scalar gate (cutoff + degeneracy)
+    """
+    if ind_2.dtype != torch.long:
+        ind_2 = ind_2.long()
+    if d3.numel() == 0:
+        return d3.new_zeros((0, 3)), d3.new_zeros((0, 1))
+
+    i = ind_2[:, 0]
+    fc = fc_edge[:, None] if fc_edge.ndim == 1 else fc_edge  # (n_pairs,1)
+
+    # 1) v_i = sum_{i->k} fc(i,k) * d3(i,k)
+    v = d3.new_zeros((int(n_atoms), 3))
+    v.index_add_(0, i, d3 * fc)
+
+    v_i = v[i]  # (n_pairs,3)
+
+    # 2) w = v_i - (v_i·d3) d3   (perpendicular rejection)
+    proj = torch.sum(v_i * d3, dim=-1, keepdim=True)          # (n_pairs,1)
+    w = v_i - proj * d3                                       # (n_pairs,3)
+
+    # 3) Robust norm and degeneracy gate
+    w2 = torch.sum(w * w, dim=-1, keepdim=True)               # (n_pairs,1)
+
+    # Reference scale tied to eps (tune factor if needed)
+    w2_ref = (10.0 * eps) ** 2                                # (scalar)
+
+    # Smooth rational gate: ~0 when w2<<w2_ref, ~1 when w2>>w2_ref
+    g_deg = w2 / (w2 + w2_ref)
+
+    # 4) Normalize, but also damp the direction by g_deg to kill stiff gradients near w=0
+    inv = torch.rsqrt(w2 + eps * eps)
+    t3 = w * inv * g_deg                                      # (n_pairs,3)
+
+    # 5) Cutoff fade (keep non-negative and decaying to 0 at rc)
+    g_cut = fc * fc                                           # (n_pairs,1)
+
+    tb_gate = g_deg * g_cut                                   # (n_pairs,1)
+    return t3, tb_gate
+
 class ScaleLayerTorch(nn.Module):
     """Equivariant scaling: X'[.., x, r] = X[.., x, r] * s[.., r]."""
 
@@ -218,6 +268,18 @@ class EquivarLayerTorch(nn.Module):
       dotted = Dot(p3)
     """
 
+    def _lift_dir(self, direction: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        """Lift scalar pair channels into a vector message along a direction.
+
+        Args:
+            direction: (n_pairs, 3) unit direction vector (e.g., d3 or t3).
+            gate:      (n_pairs, C) scalar channels to scale each direction component.
+
+        Returns:
+            (n_pairs, 3, C) vector message with per-channel scaling.
+        """
+        return direction[:, :, None] * gate[:, None, :]
+
     def __init__(
         self,
         *,
@@ -244,29 +306,28 @@ class EquivarLayerTorch(nn.Module):
         i1: torch.Tensor,
         d3: torch.Tensor,
         t3: Optional[torch.Tensor] = None,
+        fc_edge: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute updated p3 and dotted(p3).
-
+        """
         Args:
             ind_2: (n_pairs, 2) long, (i, j)
-            p3:    (n_atoms, 3, C_in) equivariant features on atoms
+            p3:    (n_atoms, 3, C_in)
             i1:    (n_pairs, C_in) pair-wise gate (rank-3 branch)
             d3:    (n_pairs, 3) unit bond directions
-            t3:    optional (n_pairs, 3) perpendicular unit vector for torsion_boost
-
-        Returns:
-            p3_new: (n_atoms, 3, C_out) updated equivariant features
-            dotted: (n_atoms, C_out) dot-product summary of p3_new
+            t3:    (n_pairs, 3) TB direction (already damped if you use the new compute_torsion_boost_t3)
+            fc_edge: (n_pairs, 1) TB scalar gate (tb_gate)
         """
-
         ix = self.pix(ind_2, p3)
         ix = self.scale(ix, i1)
-        ix = ix + self.scale(d3[:, :, None], i1)
+        ix = ix + self._lift_dir(d3, i1)
 
         if self.torsion_boost:
             if t3 is None:
-                raise ValueError("torsion_boost=True requires t3 (per-pair perpendicular unit vector).")
-            ix = ix + self.scale(t3[:, :, None], i1)
+                raise ValueError("torsion_boost=True requires t3.")
+            if fc_edge is None:
+                raise ValueError("torsion_boost=True requires tb_gate (fc_edge).")
+            # fc_edge is tb_gate: shape (n_pairs,1); broadcasts over channels
+            ix = ix + self._lift_dir(t3, i1 * fc_edge)
 
         p3_new = self.ip(ind_2, p3, ix)
         p3_new = self.pp(p3_new) if not isinstance(self.pp, nn.Identity) else p3_new
@@ -295,9 +356,9 @@ class GCBlock2Torch(nn.Module):
         if len(ii_nodes) == 0 or len(pp_nodes) == 0:
             raise ValueError("ii_nodes and pp_nodes must be non-empty for PiNet2 GCBlock")
 
-        # TF:
+        # TF (pinn/networks/pinet2.py GCBlock.__init__):
         #   ii1_nodes[-1] *= n_props
-        #   pp1_nodes[-1]  = pp_nodes[-1] * n_props
+        #   pp1_nodes[-1]  = ii_nodes[-1] * n_props
         ii1_nodes = list(ii_nodes)
         pp1_nodes = list(pp_nodes)
 
@@ -341,7 +402,8 @@ class GCBlock2Torch(nn.Module):
                 p3=tensors["p3"],
                 i1=i1s[1],
                 d3=tensors["d3"],
-                t3=tensors.get("t3", None),
+                t3=tensors.get("t3_unit", None),
+                fc_edge=tensors.get("tb_gate", None),
             )
             px_list.append(dotted_p3)
 
@@ -419,6 +481,10 @@ class PiNet2Torch(nn.Module):
         self.res_update1 = nn.ModuleList([ResUpdateTorch() for _ in range(self.depth)])
         self.res_update3 = nn.ModuleList([ResUpdateTorch() for _ in range(self.depth)]) if self.rank >= 3 else None
         self.ann_output = ANNOutputTorch(out_pool)
+        self.debug_tensors = bool(self.params.get("debug_tensors", False))
+        self._last_tensors: Dict[str, torch.Tensor] = {}
+
+        self.preprocess = PreprocessLayerTorch(atom_types, rc)
 
     def forward(self, tensors: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
@@ -427,18 +493,50 @@ class PiNet2Torch(nn.Module):
         Returns:
             per-atom energies (N,) or (N,1)  (pooling handled by PiNetPotentialTorch)
         """
-        tensors = self.preprocess(tensors)
+        # At the top of forward()
+        if not tensors.get("_preprocessed", False):
+            tensors = self.preprocess(tensors)
+
         # PiNetTorch preprocess uses "prop" for scalar features; PiNet2 docs call it "p1".
         # Keep both keys to avoid confusion.
         tensors["p1"] = tensors["prop"]
 
-        # Unit bond directions d3 (TF: diff / ||diff||)
-        diff = tensors["diff"]  # (n_pairs,3)
-        dnorm = torch.linalg.norm(diff, dim=-1, keepdim=True).clamp_min(1e-12)
-        tensors["d3"] = diff / dnorm
-
         # Init equivariants
         n_atoms = int(tensors["ind_1"].shape[0])
+
+        # Unit bond directions d3 (TF: diff / ||diff||)
+        diff = tensors["diff"]  # (n_pairs,3)
+        dnorm = torch.linalg.norm(diff, dim=-1, keepdim=True).clamp_min(1e-6)
+        tensors["d3"] = diff / dnorm
+
+        # Cutoff + basis (compute fc early so TB can use it)
+        fc = self.cutoff(tensors["dist"])
+
+        if self.debug_tensors:
+            with torch.no_grad():
+                d = tensors["dist"]
+                if d.numel():
+                    mx = float(d.max().item())
+                    alive = float((fc > 0).float().sum().item())
+                    beyond = float(((d >= self.cutoff.rc) & (fc > 0)).float().sum().item())
+                    print(f"[DEBUG] max dist={mx:.3f}, fc>0 edges={alive:.0f}, fc>0 beyond rc={beyond:.0f}")
+
+        tensors["fc"] = fc
+        basis = self.basis_fn(tensors["dist"], fc=fc)
+
+        # Optional torsion_boost geometry: cutoff-weighted t3
+        if self.torsion_boost and self.rank >= 3:
+            t3, tb_gate = compute_torsion_boost_t3(
+                ind_2=tensors["ind_2"],
+                d3=tensors["d3"],
+                n_atoms=n_atoms,
+                fc_edge=fc,
+            )
+            tensors["t3_unit"] = t3
+            tensors["tb_gate"] = tb_gate
+        else:
+            tensors.pop("t3", None)
+
         if self.rank >= 3 and "p3" not in tensors:
             tensors["p3"] = torch.zeros(
                 (n_atoms, 3, 1),
@@ -446,12 +544,16 @@ class PiNet2Torch(nn.Module):
                 device=tensors["coord"].device,
             )
 
-        # Basis
-        fc = self.cutoff(tensors["dist"])
-        basis = self.basis_fn(tensors["dist"], fc=fc)
+        # Add a debug hook
+        if self.debug_tensors:
+            self._last_tensors = {k: v for k, v in tensors.items() if isinstance(v, torch.Tensor)}
 
         # Output accumulator
-        output = torch.zeros((n_atoms, self.out_layers[0].out_units), dtype=tensors["coord"].dtype, device=tensors["coord"].device)
+        output = torch.zeros(
+            (n_atoms, self.out_layers[0].out_units),
+            dtype=tensors["coord"].dtype,
+            device=tensors["coord"].device,
+        )
 
         for i in range(self.depth):
             new_tensors = self.gc_blocks[i](tensors, basis)
@@ -466,6 +568,4 @@ class PiNet2Torch(nn.Module):
                 tensors["p3"] = self.res_update3[i](tensors["p3"], new_tensors["p3"])
 
         output = self.ann_output(tensors["ind_1"], output)
-
-        # Torch potential wrapper expects per-atom contributions
         return output

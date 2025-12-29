@@ -119,10 +119,26 @@ def get_model(params: dict, **kwargs) -> nn.Module:
         net = PiNetTorch(**common_kwargs)
 
     elif net_name == "PiNet2":
-        # PiNet2Torch(params_dict) expects a single dict argument
+        """Build PiNet2Torch from network params.
+
+        PiNet2Torch takes a single params dict (unlike PiNetTorch which uses kwargs).
+        We therefore forward common PiNet params plus PiNet2-specific add-ons.
+        """
         pinet2_params = dict(common_kwargs)
+
+        # Forward PiNet2-specific knobs (including optional feature add-ons)
         pinet2_params["rank"] = int(net_params.get("rank", 3))
         pinet2_params["torsion_boost"] = bool(net_params.get("torsion_boost", False))
+
+        # Debug / test instrumentation (safe no-op in production)
+        if "debug_tensors" in net_params:
+            pinet2_params["debug_tensors"] = bool(net_params["debug_tensors"])
+
+        # Forward other PiNet2 geometry/basis knobs if provided
+        for k in ("basis_type", "cutoff_type", "gamma", "center", "out_units", "out_pool"):
+            if k in net_params:
+                pinet2_params[k] = net_params[k]
+
         net = PiNet2Torch(pinet2_params)
     else:
         raise ValueError(f"Unknown network: {net_name}")
@@ -134,6 +150,10 @@ def get_model(params: dict, **kwargs) -> nn.Module:
         e_scale=float(mparams.get("e_scale", 1.0)),
         e_unit=float(mparams.get("e_unit", 1.0)),
     )
+
+    # --- Stress/virial configuration for Torch calculator ---
+    model.stress_mode = str(mparams.get("stress_mode", "dist")).lower()
+    model.fd_eps = float(mparams.get("fd_eps", 1e-4))
 
     _materialize_lazy(model, atom_types=net_params["atom_types"])
 
