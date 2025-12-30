@@ -158,6 +158,21 @@ def iter_batches(
 
 
 
+def _repeat_yml_loader(yml_path, *, dataset_role, opts, nl_builder):
+    """
+    Yield batches from a YAML-backed torch dataloader forever.
+
+    This matches TF's dataset.repeat() behavior and prevents StopIteration
+    when max_steps exceeds a single pass over the cached dataset.
+    """
+    while True:
+        loader = make_torch_dataloader_from_yml(
+            yml_path, dataset_role=dataset_role, opts=opts, nl_builder=nl_builder
+        )
+        for batch in loader:
+            yield batch
+
+
 def train_and_evaluate(
     *,
     model,
@@ -292,7 +307,7 @@ def train_and_evaluate(
             preprocess=preprocess_flag,
         )
 
-        train_it = iter(make_torch_dataloader_from_yml(train_yml, dataset_role="train", opts=train_opts, nl_builder=nl_builder))
+        train_it = _repeat_yml_loader(train_yml, dataset_role="train", opts=train_opts, nl_builder=nl_builder)
         eval_it = iter(make_torch_dataloader_from_yml(eval_yml, dataset_role="eval", opts=eval_opts, nl_builder=nl_builder))
 
         use_yml_pipeline = True
