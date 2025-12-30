@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from typing import Dict, Iterator
 from pinn.torch.optim import build_optimizer_from_params, apply_grad_clipping
+from pinn.torch.input_pipeline import TorchDataOptions, make_torch_dataloader_from_yml
 
 from dataclasses import dataclass
 
@@ -17,6 +18,39 @@ class PotentialLossConfig:
     use_force: bool = True
     use_e_per_atom: bool = False
     log_e_per_atom: bool = False  # affects metrics/reporting only
+
+def _get_nl_builder_from_model(model):
+    """Return the neighbor-list builder module used by the Torch network.
+
+    We keep this in one place because different wrappers may expose the network
+    differently (model.network, model.net, model.model, etc.).
+
+    Raises:
+        AttributeError if no builder can be found.
+    """
+    # Common layouts: model.network, model.net, model.model
+    candidates = [
+        getattr(model, "network", None),
+        getattr(model, "net", None),
+        getattr(model, "model", None),
+        model,
+    ]
+    for obj in candidates:
+        if obj is None:
+            continue
+        # Common preprocess holders: preprocess, preprocess_layer, pre, pp
+        for pre_name in ("preprocess", "preprocess_layer", "pre", "pp"):
+            pre = getattr(obj, pre_name, None)
+            if pre is not None and hasattr(pre, "nl"):
+                return pre.nl
+        # Sometimes NL is attached directly
+        if hasattr(obj, "nl"):
+            return obj.nl
+
+    raise AttributeError(
+        "Could not find neighbor-list builder on model. "
+        "Expected something like model.network.preprocess.nl"
+    )
 
 def _get_potential_loss_config(params: dict) -> PotentialLossConfig:
     """Parse potential_model training knobs from params dict with safe defaults."""
@@ -186,6 +220,19 @@ def train_and_evaluate(
     dict
         Metrics dict with keys 'METRICS/E_RMSE' and 'METRICS/F_RMSE'.
     """
+
+    # Torch input sources:
+    # - existing tests: data is a numpy dict
+    # - CLI path: train_yml/eval_yml point to dataset YAML
+    train_yml = kwargs.pop("train_yml", None)
+    eval_yml = kwargs.pop("eval_yml", None)
+
+    cache = bool(kwargs.pop("cache", True))
+    cache_ram = bool(kwargs.pop("cache_ram", True))
+    preprocess_flag = bool(kwargs.pop("preprocess", True))
+    scratch_dir = kwargs.pop("scratch_dir", None)
+
+
     cfg = _get_potential_loss_config(params)
     e_unit = cfg.e_unit
     e_scale = cfg.e_scale
@@ -199,12 +246,61 @@ def train_and_evaluate(
     if hasattr(model, "to"):
         model = model.to(device)
 
-    
     # Optimizer/scheduler/clipping from params.yml-style optimizer spec (generic for all torch nets)
     optim, scheduler, clip = build_optimizer_from_params(model, params, default_lr=lr)
 
-    train_it = iter_batches(data, batch_size_train, shuffle=True, seed=seed, repeat=True)
-    eval_it = iter_batches(data, batch_size_eval, shuffle=False, seed=seed, repeat=True)
+    # ---- Build data iterators (numpy dict path OR YAML/CLI path) ----
+    net_params = params.get("network", {}).get("params", {}) or {}
+    atom_types = net_params.get("atom_types", None)
+    rc = float(net_params.get("rc", 0.0))
+
+    if train_yml is not None or eval_yml is not None:
+        if train_yml is None or eval_yml is None:
+            raise ValueError("Torch runtime requires both train_yml and eval_yml when using YAML datasets.")
+        if atom_types is None:
+            raise ValueError("params['network']['params']['atom_types'] is required for Torch YAML pipeline.")
+        if rc <= 0.0:
+            raise ValueError("params['network']['params']['rc'] must be > 0 for Torch YAML pipeline.")
+
+        nl_builder = _get_nl_builder_from_model(model)
+
+        # Cache directory: prefer explicit kwarg, fall back to model_dir
+        scratch_dir = kwargs.pop("scratch_dir", None)
+        if scratch_dir is None:
+            scratch_dir = model_dir  # safe default
+
+        train_opts = TorchDataOptions(
+            batch_size=int(batch_size_train),
+            shuffle_buffer=int(shuffle_buffer),
+            atom_types=list(atom_types),
+            rc=float(rc),
+            scratch_dir=scratch_dir,
+            cache=True,
+            cache_ram=True,
+            device=device,
+            preprocess=preprocess_flag,
+        )
+        eval_opts = TorchDataOptions(
+            batch_size=int(batch_size_eval),
+            shuffle_buffer=0,
+            atom_types=list(atom_types),
+            rc=float(rc),
+            scratch_dir=scratch_dir,
+            cache=True,
+            cache_ram=True,
+            device=device,
+            preprocess=preprocess_flag,
+        )
+
+        train_it = iter(make_torch_dataloader_from_yml(train_yml, dataset_role="train", opts=train_opts, nl_builder=nl_builder))
+        eval_it = iter(make_torch_dataloader_from_yml(eval_yml, dataset_role="eval", opts=eval_opts, nl_builder=nl_builder))
+
+        use_yml_pipeline = True
+    else:
+        # Existing unit-test path: LJ toy numpy dict
+        train_it = iter_batches(data, batch_size_train, shuffle=True, seed=seed, repeat=True)
+        eval_it = iter_batches(data, batch_size_eval, shuffle=False, seed=seed, repeat=True)
+        use_yml_pipeline = False
 
     # ---- training loop ----
     if hasattr(model, "train"):
@@ -213,12 +309,21 @@ def train_and_evaluate(
     for step in range(int(max_steps)):
         batch = next(train_it)
 
-        sb = _make_sparse_batch(batch, device=device)
-
-        tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
-        E_true = sb["_E_true"]                 # (B,)
-        F_true = sb["_F_true"]                 # (B*N,3)
-        coord = tensors["coord"]               # (B*N,3) requires_grad=True
+        if use_yml_pipeline:
+            # batch is already a torch sparse+preprocessed dict
+            tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
+            if "e_data" not in batch or "f_data" not in batch:
+                raise KeyError("YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests.")
+            E_true = batch["e_data"]
+            F_true = batch["f_data"]
+            coord = tensors["coord"]
+        else:
+            # LJ numpy dict path
+            sb = _make_sparse_batch(batch, device=device)
+            tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
+            E_true = sb["_E_true"]
+            F_true = sb["_F_true"]
+            coord = tensors["coord"]
 
     # ---- forward energy ----
         if callable(model):
@@ -285,14 +390,31 @@ def train_and_evaluate(
     for _ in range(int(eval_steps)):
         batch = next(eval_it)
 
-        sb = _make_sparse_batch(batch, device=device)
+        if use_yml_pipeline:
+            # batch is already torch sparse(+maybe preprocessed)
+            if "e_data" not in batch or "f_data" not in batch:
+                raise KeyError("YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests.")
 
-        tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
-        E_true = sb["_E_true"]
-        F_true = sb["_F_true"]
-        coord = tensors["coord"]
+            # IMPORTANT: do not pass labels into the model input dict
+            tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
+            E_true = batch["e_data"]
+            F_true = batch["f_data"]
+            coord = tensors["coord"]
+        else:
+            # LJ numpy dict path
+            sb = _make_sparse_batch(batch, device=device)
+            tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
+            E_true = sb["_E_true"]
+            F_true = sb["_F_true"]
+            coord = tensors["coord"]
 
         E_pred = model(tensors)
+
+        # Accept (B,1) or (B,)
+        if E_pred.ndim == 2 and E_pred.shape[1] == 1:
+            E_pred = E_pred[:, 0]
+        elif E_pred.ndim != 1:
+            raise ValueError(f"Expected E_pred shape (B,) or (B,1), got {tuple(E_pred.shape)}")
 
         # energy error for metrics
         if cfg.log_e_per_atom:
@@ -305,7 +427,6 @@ def train_and_evaluate(
         e_sq_sum += float((e_err ** 2).sum().item())
         e_count += int(e_err.numel())
 
-        # forces only if requested
         if cfg.use_force:
             dE_dR = torch.autograd.grad(E_pred.sum(), coord, create_graph=False)[0]
             F_pred = -dE_dR
