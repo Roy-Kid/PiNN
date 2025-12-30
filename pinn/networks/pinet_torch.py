@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Iterable, List, Optional, Sequence, Union
+from pinn.io.torch.preprocess_fns import build_nl_celllist, compute_diff_dist, atomic_onehot
 
 import torch
 import torch.nn as nn
@@ -873,16 +874,26 @@ class PreprocessLayerTorch(nn.Module):
 
         if "ind_2" not in out:
             cell = out.get("cell", None)
-            nl = self._build_nl_celllist(out["ind_1"], out["coord"], cell, nl_builder=self.nl)
+            nl = build_nl_celllist(
+                ind_1=out["ind_1"],
+                coord=out["coord"],
+                cell=cell,
+                rc=self.rc,
+                nl_builder=self.nl,
+            )
+            out.update(nl)
 
-            out.update(nl)  # now adds ind_2 AND shift
 
         if "diff" not in out or "dist" not in out:
             cell = out.get("cell", None)
             shift = out.get("shift", None)
 
-            diff, dist = self._compute_diff_dist(
-                out["coord"], out["ind_2"], cell, shift, out["ind_1"]
+            diff, dist = compute_diff_dist(
+                coord=out["coord"],
+                ind_2=out["ind_2"],
+                cell=cell,
+                shift=shift,
+                ind_1=out["ind_1"],
             )
             out["diff"] = diff
             out["dist"] = dist
