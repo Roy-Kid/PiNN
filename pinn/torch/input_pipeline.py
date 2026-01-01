@@ -215,8 +215,6 @@ def _iter_batches_from_examples(
     batch_structs = []
     for ex in examples:
         buf.append(ex)
-        if opts.shuffle_buffer > 0 and len(buf) > opts.shuffle_buffer:
-            _ = pop_one()
 
         item = pop_one()
         if item is None:
