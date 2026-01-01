@@ -7,6 +7,7 @@ from pinn.torch.optim import build_optimizer_from_params, apply_grad_clipping
 from pinn.torch.input_pipeline import TorchDataOptions, make_torch_dataloader_from_yml
 from pinn.utils import init_params
 import yaml
+from torch.utils.tensorboard import SummaryWriter
 
 from dataclasses import dataclass
 
@@ -331,6 +332,7 @@ def train_and_evaluate(
     cache_ram = bool(kwargs.pop("cache_ram", True))
     preprocess_flag = bool(kwargs.pop("preprocess", True))
     scratch_dir = kwargs.pop("scratch_dir", None)
+    log_every = int(kwargs.pop("log_every", 100))
 
 
     cfg = _get_potential_loss_config(params)
@@ -342,287 +344,324 @@ def train_and_evaluate(
         raise ValueError("params['model_dir'] is required for torch training.")
     os.makedirs(model_dir, exist_ok=True)
 
-    # Move model to device (once you have a real torch model)
-    if hasattr(model, "to"):
-        model = model.to(device)
+    writer = SummaryWriter(log_dir=model_dir)  # or model_dir/"logs"
+    try: 
 
-    # Optimizer/scheduler/clipping from params.yml-style optimizer spec (generic for all torch nets)
-    optim, scheduler, clip = build_optimizer_from_params(model, params, default_lr=lr)
+        # Move model to device (once you have a real torch model)
+        if hasattr(model, "to"):
+            model = model.to(device)
 
-    # ---- Build data iterators (numpy dict path OR YAML/CLI path) ----
-    net_params = params.get("network", {}).get("params", {}) or {}
-    atom_types = net_params.get("atom_types", None)
-    rc = float(net_params.get("rc", 0.0))
+        # Optimizer/scheduler/clipping from params.yml-style optimizer spec (generic for all torch nets)
+        optim, scheduler, clip = build_optimizer_from_params(model, params, default_lr=lr)
 
-    if train_yml is not None or eval_yml is not None:
-        if train_yml is None or eval_yml is None:
-            raise ValueError("Torch runtime requires both train_yml and eval_yml when using YAML datasets.")
-        if atom_types is None:
-            raise ValueError("params['network']['params']['atom_types'] is required for Torch YAML pipeline.")
-        if rc <= 0.0:
-            raise ValueError("params['network']['params']['rc'] must be > 0 for Torch YAML pipeline.")
+        # ---- Build data iterators (numpy dict path OR YAML/CLI path) ----
+        net_params = params.get("network", {}).get("params", {}) or {}
+        atom_types = net_params.get("atom_types", None)
+        rc = float(net_params.get("rc", 0.0))
 
-        nl_builder = _get_nl_builder_from_model(model)
+        if train_yml is not None or eval_yml is not None:
+            if train_yml is None or eval_yml is None:
+                raise ValueError("Torch runtime requires both train_yml and eval_yml when using YAML datasets.")
+            if atom_types is None:
+                raise ValueError("params['network']['params']['atom_types'] is required for Torch YAML pipeline.")
+            if rc <= 0.0:
+                raise ValueError("params['network']['params']['rc'] must be > 0 for Torch YAML pipeline.")
 
-        # Cache directory: prefer explicit kwarg, fall back to model_dir
-        scratch_dir = kwargs.pop("scratch_dir", None)
-        if scratch_dir is None:
-            scratch_dir = model_dir  # safe default
+            nl_builder = _get_nl_builder_from_model(model)
 
-        train_opts = TorchDataOptions(
-            batch_size=int(batch_size_train),
-            shuffle_buffer=int(shuffle_buffer),
-            atom_types=list(atom_types),
-            rc=float(rc),
-            scratch_dir=scratch_dir,
-            cache=True,
-            cache_ram=True,
-            device=device,
-            preprocess=preprocess_flag,
-        )
-        eval_opts = TorchDataOptions(
-            batch_size=int(batch_size_eval),
-            shuffle_buffer=0,
-            atom_types=list(atom_types),
-            rc=float(rc),
-            scratch_dir=scratch_dir,
-            cache=True,
-            cache_ram=True,
-            device=device,
-            preprocess=preprocess_flag,
-        )
+            # Cache directory: prefer explicit kwarg, fall back to model_dir
+            if scratch_dir is None:
+                scratch_dir = model_dir  # safe default
 
-        train_it = _repeat_yml_loader(train_yml, dataset_role="train", opts=train_opts, nl_builder=nl_builder)
-    
-        use_yml_pipeline = True
-    else:
-        # Existing unit-test path: LJ toy numpy dict
-        train_it = iter_batches(data, batch_size_train, shuffle=True, seed=seed, repeat=True)
-        eval_it = iter_batches(data, batch_size_eval, shuffle=False, seed=seed, repeat=True)
-        use_yml_pipeline = False
-    
-    # ---- atomic dressing (Torch parity with TF) ----
-    model_params = params.get("model", {}).get("params", {}) or {}
-    if params.get("model", {}).get("name") == "potential_model" and "e_dress" not in model_params:
-        # init_params is TF-only: always feed it a tf.data.Dataset
-        try:
-            if use_yml_pipeline:
-                from pinn.io import load_tfrecord  # -> tf.data.Dataset
-                tf_train_ds = load_tfrecord(train_yml)
-            else:
-                from pinn.io import load_numpy     # -> tf.data.Dataset
-                tf_train_ds = load_numpy(data)
-
-            init_params(params, tf_train_ds)  # TF contract satisfied
-            _inject_e_dress_into_torch_model(model, params)
-            print("Torch model e_dress active:", getattr(model, "e_dress", None))
-
-        except Exception as e:
-            raise RuntimeError(
-                "Failed to initialize e_dress via TF init_params(). "
-                "This requires TensorFlow and a valid TF dataset input."
-            ) from e
-
-        # Persist params.yml
-        params_path = os.path.join(model_dir, "params.yml")
-        with open(params_path, "w") as f:
-            yaml.safe_dump(params, f)
-
-    # ---- training loop ----
-    if hasattr(model, "train"):
-        model.train()
-
-    for step in range(int(max_steps)):
-        batch = next(train_it)
-
-        if use_yml_pipeline:
-            # batch is already a torch sparse+preprocessed dict
-            tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
-            if "e_data" not in batch or "f_data" not in batch:
-                raise KeyError("YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests.")
-            E_true = batch["e_data"]
-            F_true = batch["f_data"]
-            F_true = _flatten_forces(F_true)
-            coord = tensors["coord"]
-            if not coord.requires_grad or not coord.is_leaf:
-                coord = coord.detach().clone().requires_grad_(True)
-                tensors["coord"] = coord
-        else:
-            # LJ numpy dict path
-            sb = _make_sparse_batch(batch, device=device)
-            tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
-            E_true = sb["_E_true"]
-            F_true = sb["_F_true"]
-            F_true = _flatten_forces(F_true)
-            coord = tensors["coord"]
-            if not coord.requires_grad or not coord.is_leaf:
-                coord = coord.detach().clone().requires_grad_(True)
-                tensors["coord"] = coord
-
-    # ---- forward energy ----
-        if callable(model):
-            E_pred = model(tensors)            # expected (B,)
-        else:
-            raise TypeError("Torch backend expects a callable torch model.")
-
-        if E_pred.ndim != 1:
-            raise ValueError(f"Expected E_pred shape (B,), got {tuple(E_pred.shape)}")
-
-    #---- forces via autograd (only if needed) ----
-        if cfg.use_force:
-            dE_dR = torch.autograd.grad(
-            E_pred.sum(),
-            coord,
-            create_graph=True,   # force loss needs gradients w.r.t. model params
-            retain_graph=True,   # keep graph for energy backward
-            )[0]
-            F_pred = -dE_dR
-        else:
-            F_pred = None  # type: ignore[assignment]
-
-    # ---- loss (same convention as test) ----
-        # ---- energy loss (optionally per-atom normalized) ----
-        if cfg.use_e_per_atom:
-            B = int(E_true.shape[0])
-            counts = torch.bincount(tensors["ind_1"][:, 0], minlength=B).to(E_true.dtype).clamp_min(1.0)
-            E_pred_used = E_pred / counts
-            E_true_used = E_true / counts
-        else:
-            E_pred_used = E_pred
-            E_true_used = E_true
-
-        e_err = (E_pred_used / e_unit) - E_true_used
-        e_loss = (e_err ** 2).mean()
-
-        # ---- force loss (optional) ----
-        if cfg.use_force:
-            assert F_pred.shape == F_true.shape, (F_pred.shape, F_true.shape)
-            f_err = (F_pred / e_unit) - F_true
-            f_loss = (f_err ** 2).mean()
-        else:
-            f_loss = torch.zeros((), dtype=e_loss.dtype, device=e_loss.device)
-
-        loss = cfg.e_loss_multiplier * e_loss + cfg.f_loss_multiplier * f_loss
-
-        if optim is not None:
-            optim.zero_grad(set_to_none=True)
-            loss.backward()
-            apply_grad_clipping(model, clip)
-            optim.step()
-            if scheduler is not None:
-                scheduler.step()
-
-    # ---- evaluation loop (compute RMSE) ----
-    if hasattr(model, "eval"):
-        model.eval()
-
-    # We need gradients to compute forces, so we cannot wrap eval in torch.no_grad().
-    e_sq_sum = 0.0
-    e_count = 0
-    f_sq_sum = 0.0
-    f_count = 0
-
-    if use_yml_pipeline:
-        # Best practice (minimal change): build a fresh eval loader here and iterate safely.
-        eval_loader = make_torch_dataloader_from_yml(
-            eval_yml, dataset_role="eval", opts=eval_opts, nl_builder=nl_builder
-        )
-        eval_iter = iter(eval_loader)
-    else:
-        # Existing unit-test path: repeat=True iterator
-        eval_iter = eval_it
-
-    for _ in range(int(eval_steps)):
-        try:
-            batch = next(eval_iter)
-        except StopIteration:
-            # YAML eval set exhausted before eval_steps; stop cleanly.
-            break
-
-        if use_yml_pipeline:
-            # batch is already torch sparse(+maybe preprocessed)
-            if "e_data" not in batch or "f_data" not in batch:
-                raise KeyError(
-                    "YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests."
-                )
-
-            # IMPORTANT: do not pass labels into the model input dict
-            tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
-            E_true = batch["e_data"]
-            F_true = batch["f_data"]
-            F_true = _flatten_forces(F_true)
-            coord = tensors["coord"]
-            if not coord.requires_grad or not coord.is_leaf:
-                coord = coord.detach().clone().requires_grad_(True)
-                tensors["coord"] = coord
-        else:
-            # LJ numpy dict path
-            sb = _make_sparse_batch(batch, device=device)
-            tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
-            E_true = sb["_E_true"]
-            F_true = sb["_F_true"]
-            F_true = _flatten_forces(F_true)
-            coord = tensors["coord"]
-            if not coord.requires_grad or not coord.is_leaf:
-                coord = coord.detach().clone().requires_grad_(True)
-                tensors["coord"] = coord
-
-        E_pred = model(tensors)
-
-        # Accept (B,1) or (B,)
-        if E_pred.ndim == 2 and E_pred.shape[1] == 1:
-            E_pred = E_pred[:, 0]
-        elif E_pred.ndim != 1:
-            raise ValueError(f"Expected E_pred shape (B,) or (B,1), got {tuple(E_pred.shape)}")
-
-        # energy error for metrics
-        if cfg.log_e_per_atom:
-            B = int(E_true.shape[0])
-            counts = (
-                torch.bincount(tensors["ind_1"][:, 0], minlength=B)
-                .to(E_true.dtype)
-                .clamp_min(1.0)
+            train_opts = TorchDataOptions(
+                batch_size=int(batch_size_train),
+                shuffle_buffer=int(shuffle_buffer),
+                atom_types=list(atom_types),
+                rc=float(rc),
+                scratch_dir=scratch_dir,
+                cache=True,
+                cache_ram=True,
+                device=device,
+                preprocess=preprocess_flag,
             )
-            e_err = ((E_pred / counts) / e_unit) - (E_true / counts)
+            eval_opts = TorchDataOptions(
+                batch_size=int(batch_size_eval),
+                shuffle_buffer=0,
+                atom_types=list(atom_types),
+                rc=float(rc),
+                scratch_dir=scratch_dir,
+                cache=True,
+                cache_ram=True,
+                device=device,
+                preprocess=preprocess_flag,
+            )
+
+            train_it = _repeat_yml_loader(train_yml, dataset_role="train", opts=train_opts, nl_builder=nl_builder)
+        
+            use_yml_pipeline = True
         else:
-            e_err = (E_pred / e_unit) - E_true
+            # Existing unit-test path: LJ toy numpy dict
+            train_it = iter_batches(data, batch_size_train, shuffle=True, seed=seed, repeat=True)
+            eval_it = iter_batches(data, batch_size_eval, shuffle=False, seed=seed, repeat=True)
+            use_yml_pipeline = False
+        
+        # ---- atomic dressing (Torch parity with TF) ----
+        model_params = params.get("model", {}).get("params", {}) or {}
+        if params.get("model", {}).get("name") == "potential_model" and "e_dress" not in model_params:
+            # init_params is TF-only: always feed it a tf.data.Dataset
+            try:
+                if use_yml_pipeline:
+                    from pinn.io import load_tfrecord  # -> tf.data.Dataset
+                    tf_train_ds = load_tfrecord(train_yml)
+                else:
+                    from pinn.io import load_numpy     # -> tf.data.Dataset
+                    tf_train_ds = load_numpy(data)
 
-        e_sq_sum += float((e_err ** 2).sum().item())
-        e_count += int(e_err.numel())
+                init_params(params, tf_train_ds)  # TF contract satisfied
+                _inject_e_dress_into_torch_model(model, params)
+                print("Torch model e_dress active:", getattr(model, "e_dress", None))
 
+            except Exception as e:
+                raise RuntimeError(
+                    "Failed to initialize e_dress via TF init_params(). "
+                    "This requires TensorFlow and a valid TF dataset input."
+                ) from e
+
+            # Persist params.yml
+            params_path = os.path.join(model_dir, "params.yml")
+            with open(params_path, "w") as f:
+                yaml.safe_dump(params, f)
+
+        # ---- training loop ----
+        if hasattr(model, "train"):
+            model.train()
+
+        for step in range(int(max_steps)):
+            batch = next(train_it)
+
+            if use_yml_pipeline:
+                # batch is already a torch sparse+preprocessed dict
+                tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
+                if "e_data" not in batch or "f_data" not in batch:
+                    raise KeyError("YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests.")
+                E_true = batch["e_data"]
+                F_true = batch["f_data"]
+                F_true = _flatten_forces(F_true)
+                coord = tensors["coord"]
+                if not coord.requires_grad or not coord.is_leaf:
+                    coord = coord.detach().clone().requires_grad_(True)
+                    tensors["coord"] = coord
+            else:
+                # LJ numpy dict path
+                sb = _make_sparse_batch(batch, device=device)
+                tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
+                E_true = sb["_E_true"]
+                F_true = sb["_F_true"]
+                F_true = _flatten_forces(F_true)
+                coord = tensors["coord"]
+                if not coord.requires_grad or not coord.is_leaf:
+                    coord = coord.detach().clone().requires_grad_(True)
+                    tensors["coord"] = coord
+
+        # ---- forward energy ----
+            if callable(model):
+                E_pred = model(tensors)            # expected (B,)
+            else:
+                raise TypeError("Torch backend expects a callable torch model.")
+
+            if E_pred.ndim != 1:
+                raise ValueError(f"Expected E_pred shape (B,), got {tuple(E_pred.shape)}")
+
+        #---- forces via autograd (only if needed) ----
+            if cfg.use_force:
+                dE_dR = torch.autograd.grad(
+                E_pred.sum(),
+                coord,
+                create_graph=True,   # force loss needs gradients w.r.t. model params
+                retain_graph=True,   # keep graph for energy backward
+                )[0]
+                F_pred = -dE_dR
+            else:
+                F_pred = None  # type: ignore[assignment]
+
+        # ---- loss (same convention as test) ----
+            # ---- energy loss (optionally per-atom normalized) ----
+            if cfg.use_e_per_atom:
+                B = int(E_true.shape[0])
+                counts = torch.bincount(tensors["ind_1"][:, 0], minlength=B).to(E_true.dtype).clamp_min(1.0)
+                E_pred_used = E_pred / counts
+                E_true_used = E_true / counts
+            else:
+                E_pred_used = E_pred
+                E_true_used = E_true
+
+            e_err = (E_pred_used / e_unit) - E_true_used
+            e_loss = (e_err ** 2).mean()
+
+            # ---- force loss (optional) ----
+            if cfg.use_force:
+                assert F_pred.shape == F_true.shape, (F_pred.shape, F_true.shape)
+                f_err = (F_pred / e_unit) - F_true
+                f_loss = (f_err ** 2).mean()
+            else:
+                f_loss = torch.zeros((), dtype=e_loss.dtype, device=e_loss.device)
+
+            loss = cfg.e_loss_multiplier * e_loss + cfg.f_loss_multiplier * f_loss
+
+            if optim is not None:
+                optim.zero_grad(set_to_none=True)
+                loss.backward()
+                apply_grad_clipping(model, clip)
+                optim.step()
+                if (step % log_every) == 0:
+                    # ---- metric errors: must match eval convention ----
+                    if cfg.log_e_per_atom:
+                        B = int(E_true.shape[0])
+                        counts = (
+                            torch.bincount(tensors["ind_1"][:, 0], minlength=B)
+                            .to(E_true.dtype)
+                            .clamp_min(1.0)
+                        )
+                        # Energy metric is per-atom
+                        e_err_metric = ((E_pred / counts) / e_unit) - (E_true / counts)
+                    else:
+                        # Energy metric is per-structure
+                        e_err_metric = (E_pred / e_unit) - E_true
+
+                    train_e_rmse = torch.sqrt((e_err_metric ** 2).mean()).item()
+
+                    if cfg.use_force:
+                        # Force metric is always in force label space (no per-atom normalization)
+                        f_err_metric = (F_pred / e_unit) - F_true
+                        train_f_rmse = torch.sqrt((f_err_metric ** 2).mean()).item()
+                    else:
+                        train_f_rmse = 0.0
+
+                    lr_now = optim.param_groups[0]["lr"] if optim is not None else float("nan")
+                    writer.add_scalar("train/loss", float(loss.item()), step)
+                    writer.add_scalar("train/E_RMSE", train_e_rmse, step)
+                    writer.add_scalar("train/F_RMSE", train_f_rmse, step)
+                    writer.add_scalar("train/lr", float(lr_now), step)
+                    writer.flush()
+                if scheduler is not None:
+                    scheduler.step()
+
+        # ---- evaluation loop (compute RMSE) ----
+        if hasattr(model, "eval"):
+            model.eval()
+
+        # We need gradients to compute forces, so we cannot wrap eval in torch.no_grad().
+        e_sq_sum = 0.0
+        e_count = 0
+        f_sq_sum = 0.0
+        f_count = 0
+
+        if use_yml_pipeline:
+            # Best practice (minimal change): build a fresh eval loader here and iterate safely.
+            eval_loader = make_torch_dataloader_from_yml(
+                eval_yml, dataset_role="eval", opts=eval_opts, nl_builder=nl_builder
+            )
+            eval_iter = iter(eval_loader)
+        else:
+            # Existing unit-test path: repeat=True iterator
+            eval_iter = eval_it
+
+        for _ in range(int(eval_steps)):
+            try:
+                batch = next(eval_iter)
+            except StopIteration:
+                # YAML eval set exhausted before eval_steps; stop cleanly.
+                break
+
+            if use_yml_pipeline:
+                # batch is already torch sparse(+maybe preprocessed)
+                if "e_data" not in batch or "f_data" not in batch:
+                    raise KeyError(
+                        "YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests."
+                    )
+
+                # IMPORTANT: do not pass labels into the model input dict
+                tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
+                E_true = batch["e_data"]
+                F_true = batch["f_data"]
+                F_true = _flatten_forces(F_true)
+                coord = tensors["coord"]
+                if not coord.requires_grad or not coord.is_leaf:
+                    coord = coord.detach().clone().requires_grad_(True)
+                    tensors["coord"] = coord
+            else:
+                # LJ numpy dict path
+                sb = _make_sparse_batch(batch, device=device)
+                tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
+                E_true = sb["_E_true"]
+                F_true = sb["_F_true"]
+                F_true = _flatten_forces(F_true)
+                coord = tensors["coord"]
+                if not coord.requires_grad or not coord.is_leaf:
+                    coord = coord.detach().clone().requires_grad_(True)
+                    tensors["coord"] = coord
+
+            E_pred = model(tensors)
+
+            # Accept (B,1) or (B,)
+            if E_pred.ndim == 2 and E_pred.shape[1] == 1:
+                E_pred = E_pred[:, 0]
+            elif E_pred.ndim != 1:
+                raise ValueError(f"Expected E_pred shape (B,) or (B,1), got {tuple(E_pred.shape)}")
+
+            # energy error for metrics
+            if cfg.log_e_per_atom:
+                B = int(E_true.shape[0])
+                counts = (
+                    torch.bincount(tensors["ind_1"][:, 0], minlength=B)
+                    .to(E_true.dtype)
+                    .clamp_min(1.0)
+                )
+                e_err = ((E_pred / counts) / e_unit) - (E_true / counts)
+            else:
+                e_err = (E_pred / e_unit) - E_true
+
+            e_sq_sum += float((e_err ** 2).sum().item())
+            e_count += int(e_err.numel())
+
+            if cfg.use_force:
+                dE_dR = torch.autograd.grad(E_pred.sum(), coord, create_graph=False)[0]
+                F_pred = -dE_dR
+                f_err = (F_pred / e_unit) - F_true
+                f_sq_sum += float((f_err ** 2).sum().item())
+                f_count += int(f_err.numel())
+
+        e_rmse = float(np.sqrt(e_sq_sum / max(e_count, 1)))
         if cfg.use_force:
-            dE_dR = torch.autograd.grad(E_pred.sum(), coord, create_graph=False)[0]
-            F_pred = -dE_dR
-            f_err = (F_pred / e_unit) - F_true
-            f_sq_sum += float((f_err ** 2).sum().item())
-            f_count += int(f_err.numel())
+            f_rmse = float(np.sqrt(f_sq_sum / max(f_count, 1)))
+        else:
+            f_rmse = 0.0
+        
+        writer.add_scalar("eval/E_RMSE", e_rmse, max_steps)
+        writer.add_scalar("eval/F_RMSE", f_rmse, max_steps)
+        writer.flush()
 
-    e_rmse = float(np.sqrt(e_sq_sum / max(e_count, 1)))
-    if cfg.use_force:
-        f_rmse = float(np.sqrt(f_sq_sum / max(f_count, 1)))
-    else:
-        f_rmse = 0.0
+        # Save checkpoint
+        if hasattr(model, "state_dict"):
+            to_save = model
+            # If later you ever wrap with nn.DataParallel / DDP
+            if hasattr(model, "module"):
+                to_save = model.module
 
-    # Save checkpoint
-    if hasattr(model, "state_dict"):
-        to_save = model
-        # If later you ever wrap with nn.DataParallel / DDP
-        if hasattr(model, "module"):
-            to_save = model.module
-
-        ckpt = {
-            "model_state_dict": to_save.state_dict(),
-            "params": params,
-            # Optional metadata (harmless, helps debugging)
-            "pytorch_version": torch.__version__,
-        }
-        torch.save(ckpt, os.path.join(model_dir, "model.pt"))
+            ckpt = {
+                "model_state_dict": to_save.state_dict(),
+                "params": params,
+                # Optional metadata (harmless, helps debugging)
+                "pytorch_version": torch.__version__,
+            }
+            torch.save(ckpt, os.path.join(model_dir, "model.pt"))
+    finally:
+        writer.close()    
 
     return {
         "METRICS/E_RMSE": e_scale * e_rmse,
         "METRICS/F_RMSE": e_scale * f_rmse,
     }
-
 
 
 
