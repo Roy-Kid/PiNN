@@ -5,6 +5,7 @@ import os
 import numpy as np
 import torch
 from ase.calculators.calculator import Calculator, all_changes
+from pinn.torch.device import resolve_device
 
 from .model import get_model as build_model
 
@@ -78,10 +79,11 @@ class TorchPiNNCalc(Calculator):
 
     implemented_properties = ["energy", "forces", "stress"]
 
-    def __init__(self, model, *, device="cpu", virial_mode="diff", **kwargs):
+    def __init__(self, model, *, device="auto", virial_mode="diff", **kwargs):
         super().__init__(**kwargs)
-        self.model = model.to(device)
-        self.device = device
+        dev = resolve_device(device)
+        self.device = str(dev)
+        self.model = model.to(self.device)
         self.virial_mode = virial_mode
 
     def calculate(self, atoms=None, properties=("energy", "forces", "stress"), system_changes=all_changes):
@@ -328,7 +330,9 @@ def get_calc(model_spec, **kwargs):
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Missing torch checkpoint: {ckpt_path}")
 
-    device = kwargs.pop("device", "cpu")
+    device = kwargs.pop("device", "auto")
+    dev = resolve_device(device)
+    device = str(dev)
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
 

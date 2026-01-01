@@ -11,6 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 import glob
 from pathlib import Path
 from pinn.io.build_dataset import build_dataset, BuildOptions
+from pinn.torch.device import resolve_device
 
 from dataclasses import dataclass
 
@@ -358,7 +359,7 @@ def train_and_evaluate(
     shuffle_buffer: int = 0,
     lr: float = 1e-3,
     seed: int = 0,
-    device: str = "cpu",
+    device: str = "auto",
     **kwargs,
 ):
     """Train and evaluate a torch PiNN model on the LJ toy dataset.
@@ -425,7 +426,8 @@ def train_and_evaluate(
     resume = bool(kwargs.pop("resume", True))
     eval_every = int(kwargs.pop("eval_every", 1000))   # how often to run eval during training
     eval_batches = int(kwargs.pop("eval_batches", eval_steps))  # optional: cheaper periodic eval
-
+    dev = resolve_device(device)
+    device = str(dev)
 
     cfg = _get_potential_loss_config(params)
     e_unit = cfg.e_unit
