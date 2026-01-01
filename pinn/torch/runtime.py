@@ -5,6 +5,8 @@ import torch
 from typing import Dict, Iterator
 from pinn.torch.optim import build_optimizer_from_params, apply_grad_clipping
 from pinn.torch.input_pipeline import TorchDataOptions, make_torch_dataloader_from_yml
+from pinn.utils import init_params
+import yaml
 
 from dataclasses import dataclass
 
@@ -18,6 +20,88 @@ class PotentialLossConfig:
     use_force: bool = True
     use_e_per_atom: bool = False
     log_e_per_atom: bool = False  # affects metrics/reporting only
+
+def _flatten_forces(F: torch.Tensor) -> torch.Tensor:
+    # Accept (B,N,3) or (BN,3) and return (BN,3)
+    if F.ndim == 3 and F.shape[-1] == 3:
+        return F.reshape(-1, 3)
+    if F.ndim == 2 and F.shape[-1] == 3:
+        return F
+    raise ValueError(f"Unexpected force shape: {tuple(F.shape)}")
+
+
+def _inject_e_dress_into_torch_model(model, params: dict) -> None:
+    mp = params.get("model", {}).get("params", {}) or {}
+    dress = mp.get("e_dress", None)
+    if not dress:
+        return
+
+    # YAML may load keys as int already, but be strict.
+    dress = {int(k): float(v) for k, v in dress.items()}
+
+    # Handle common wrappers: model, model.model, model.network, etc.
+    candidates = [
+        model,
+        getattr(model, "model", None),
+        getattr(model, "network", None),
+        getattr(model, "net", None),
+    ]
+    for obj in candidates:
+        if obj is None:
+            continue
+        if hasattr(obj, "e_dress"):
+            obj.e_dress = dress
+
+def _structure_iter_from_torch_batches(batch_iter, max_structures=1000):
+    """
+    Yield per-structure dicts compatible with pinn.utils.init_params.
+
+    This strips batching, gradients, devices, and sparse flattening.
+    """
+    seen = 0
+    for batch in batch_iter:
+        # YAML pipeline: coord is (B*N,3), ind_1 maps atoms -> structure
+        coord = batch["coord"].detach().cpu()
+        elems = batch["elems"].detach().cpu()
+        e_data = batch["e_data"].detach().cpu()
+        ind_1 = batch["ind_1"][:, 0].detach().cpu()
+
+        B = int(e_data.shape[0])
+
+        for b in range(B):
+            mask = ind_1 == b
+            yield {
+                "coord": coord[mask].numpy(),
+                "elems": elems[mask].numpy(),
+                "e_data": float(e_data[b]),
+            }
+            seen += 1
+            if seen >= max_structures:
+                return
+
+def _torch_structure_iter_to_tf_dataset(struct_iter):
+    """
+    Adapt a Torch/Python structure iterator to a tf.data.Dataset
+    compatible with pinn.utils.init_params.
+    """
+    import tensorflow as tf
+
+    def gen():
+        for s in struct_iter:
+            yield {
+                "coord": s["coord"],
+                "elems": s["elems"],
+                "e_data": s["e_data"],
+            }
+
+    return tf.data.Dataset.from_generator(
+        gen,
+        output_signature={
+            "coord": tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            "elems": tf.TensorSpec(shape=(None,), dtype=tf.int32),
+            "e_data": tf.TensorSpec(shape=(), dtype=tf.float32),
+        },
+    )
 
 def _get_nl_builder_from_model(model):
     """Return the neighbor-list builder module used by the Torch network.
@@ -84,6 +168,7 @@ def _make_sparse_batch(
     Z = torch.tensor(batch["elems"], dtype=torch.long, device=device)     # (B,N)
     E_true = torch.tensor(batch["e_data"], dtype=torch.float32, device=device)  # (B,)
     F_true = torch.tensor(batch["f_data"], dtype=torch.float32, device=device)  # (B,N,3)
+
 
     B, N, _ = R.shape
 
@@ -156,6 +241,21 @@ def iter_batches(
         if not repeat:
             break
 
+
+
+def _repeat_yml_loader(yml_path, *, dataset_role, opts, nl_builder):
+    """
+    Yield batches from a YAML-backed torch dataloader forever.
+
+    This matches TF's dataset.repeat() behavior and prevents StopIteration
+    when max_steps exceeds a single pass over the cached dataset.
+    """
+    while True:
+        loader = make_torch_dataloader_from_yml(
+            yml_path, dataset_role=dataset_role, opts=opts, nl_builder=nl_builder
+        )
+        for batch in loader:
+            yield batch
 
 
 def train_and_evaluate(
@@ -292,15 +392,41 @@ def train_and_evaluate(
             preprocess=preprocess_flag,
         )
 
-        train_it = iter(make_torch_dataloader_from_yml(train_yml, dataset_role="train", opts=train_opts, nl_builder=nl_builder))
-        eval_it = iter(make_torch_dataloader_from_yml(eval_yml, dataset_role="eval", opts=eval_opts, nl_builder=nl_builder))
-
+        train_it = _repeat_yml_loader(train_yml, dataset_role="train", opts=train_opts, nl_builder=nl_builder)
+    
         use_yml_pipeline = True
     else:
         # Existing unit-test path: LJ toy numpy dict
         train_it = iter_batches(data, batch_size_train, shuffle=True, seed=seed, repeat=True)
         eval_it = iter_batches(data, batch_size_eval, shuffle=False, seed=seed, repeat=True)
         use_yml_pipeline = False
+    
+    # ---- atomic dressing (Torch parity with TF) ----
+    model_params = params.get("model", {}).get("params", {}) or {}
+    if params.get("model", {}).get("name") == "potential_model" and "e_dress" not in model_params:
+        # init_params is TF-only: always feed it a tf.data.Dataset
+        try:
+            if use_yml_pipeline:
+                from pinn.io import load_tfrecord  # -> tf.data.Dataset
+                tf_train_ds = load_tfrecord(train_yml)
+            else:
+                from pinn.io import load_numpy     # -> tf.data.Dataset
+                tf_train_ds = load_numpy(data)
+
+            init_params(params, tf_train_ds)  # TF contract satisfied
+            _inject_e_dress_into_torch_model(model, params)
+            print("Torch model e_dress active:", getattr(model, "e_dress", None))
+
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to initialize e_dress via TF init_params(). "
+                "This requires TensorFlow and a valid TF dataset input."
+            ) from e
+
+        # Persist params.yml
+        params_path = os.path.join(model_dir, "params.yml")
+        with open(params_path, "w") as f:
+            yaml.safe_dump(params, f)
 
     # ---- training loop ----
     if hasattr(model, "train"):
@@ -316,14 +442,22 @@ def train_and_evaluate(
                 raise KeyError("YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests.")
             E_true = batch["e_data"]
             F_true = batch["f_data"]
+            F_true = _flatten_forces(F_true)
             coord = tensors["coord"]
+            if not coord.requires_grad or not coord.is_leaf:
+                coord = coord.detach().clone().requires_grad_(True)
+                tensors["coord"] = coord
         else:
             # LJ numpy dict path
             sb = _make_sparse_batch(batch, device=device)
             tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
             E_true = sb["_E_true"]
             F_true = sb["_F_true"]
+            F_true = _flatten_forces(F_true)
             coord = tensors["coord"]
+            if not coord.requires_grad or not coord.is_leaf:
+                coord = coord.detach().clone().requires_grad_(True)
+                tensors["coord"] = coord
 
     # ---- forward energy ----
         if callable(model):
@@ -362,6 +496,7 @@ def train_and_evaluate(
 
         # ---- force loss (optional) ----
         if cfg.use_force:
+            assert F_pred.shape == F_true.shape, (F_pred.shape, F_true.shape)
             f_err = (F_pred / e_unit) - F_true
             f_loss = (f_err ** 2).mean()
         else:
@@ -387,26 +522,50 @@ def train_and_evaluate(
     f_sq_sum = 0.0
     f_count = 0
 
+    if use_yml_pipeline:
+        # Best practice (minimal change): build a fresh eval loader here and iterate safely.
+        eval_loader = make_torch_dataloader_from_yml(
+            eval_yml, dataset_role="eval", opts=eval_opts, nl_builder=nl_builder
+        )
+        eval_iter = iter(eval_loader)
+    else:
+        # Existing unit-test path: repeat=True iterator
+        eval_iter = eval_it
+
     for _ in range(int(eval_steps)):
-        batch = next(eval_it)
+        try:
+            batch = next(eval_iter)
+        except StopIteration:
+            # YAML eval set exhausted before eval_steps; stop cleanly.
+            break
 
         if use_yml_pipeline:
             # batch is already torch sparse(+maybe preprocessed)
             if "e_data" not in batch or "f_data" not in batch:
-                raise KeyError("YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests.")
+                raise KeyError(
+                    "YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests."
+                )
 
             # IMPORTANT: do not pass labels into the model input dict
             tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
             E_true = batch["e_data"]
             F_true = batch["f_data"]
+            F_true = _flatten_forces(F_true)
             coord = tensors["coord"]
+            if not coord.requires_grad or not coord.is_leaf:
+                coord = coord.detach().clone().requires_grad_(True)
+                tensors["coord"] = coord
         else:
             # LJ numpy dict path
             sb = _make_sparse_batch(batch, device=device)
             tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
             E_true = sb["_E_true"]
             F_true = sb["_F_true"]
+            F_true = _flatten_forces(F_true)
             coord = tensors["coord"]
+            if not coord.requires_grad or not coord.is_leaf:
+                coord = coord.detach().clone().requires_grad_(True)
+                tensors["coord"] = coord
 
         E_pred = model(tensors)
 
@@ -419,7 +578,11 @@ def train_and_evaluate(
         # energy error for metrics
         if cfg.log_e_per_atom:
             B = int(E_true.shape[0])
-            counts = torch.bincount(tensors["ind_1"][:, 0], minlength=B).to(E_true.dtype).clamp_min(1.0)
+            counts = (
+                torch.bincount(tensors["ind_1"][:, 0], minlength=B)
+                .to(E_true.dtype)
+                .clamp_min(1.0)
+            )
             e_err = ((E_pred / counts) / e_unit) - (E_true / counts)
         else:
             e_err = (E_pred / e_unit) - E_true

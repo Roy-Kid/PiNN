@@ -107,6 +107,7 @@ def test_pinet2_rank3_energy_invariant(mocked_data, backend):
                     "act": "tanh",
                     "out_units": 1,
                     "out_pool": False,
+                    "torsion_boost": True,
                 }
             )
 
