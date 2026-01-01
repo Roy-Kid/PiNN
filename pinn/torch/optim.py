@@ -134,7 +134,22 @@ def build_optimizer_from_params(
 
     params_list = [p for p in model.parameters() if p.requires_grad]
     if cls.lower() == "adam":
-        opt = torch.optim.Adam(params_list, lr=base_lr, **cfg)
+        adam_cfg = opt_spec.get("config", {}) or {}
+
+        eps = float(adam_cfg.get("epsilon", adam_cfg.get("eps", 1e-8)))
+        betas = (
+            float(adam_cfg.get("beta_1", 0.9)),
+            float(adam_cfg.get("beta_2", 0.999)),
+        )
+        amsgrad = bool(adam_cfg.get("amsgrad", False))
+
+        opt = torch.optim.Adam(
+            params_list,
+            lr=base_lr,
+            betas=betas,
+            eps=eps,
+            amsgrad=amsgrad,
+        )
     elif cls.lower() == "adamw":
         opt = torch.optim.AdamW(params_list, lr=base_lr, **cfg)
     elif cls.lower() == "sgd":
