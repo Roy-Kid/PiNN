@@ -2,12 +2,15 @@
 import os
 import numpy as np
 import torch
-from typing import Dict, Iterator
+from typing import Dict, Iterator, Optional
 from pinn.torch.optim import build_optimizer_from_params, apply_grad_clipping
-from pinn.torch.input_pipeline import TorchDataOptions, make_torch_dataloader_from_yml
+from pinn.torch.input_pipeline import TorchDataOptions, make_torch_dataloader_from_yml, _iter_batches_from_examples
 from pinn.utils import init_params
 import yaml
 from torch.utils.tensorboard import SummaryWriter
+import glob
+from pathlib import Path
+from pinn.io.build_dataset import build_dataset, BuildOptions
 
 from dataclasses import dataclass
 
@@ -21,6 +24,95 @@ class PotentialLossConfig:
     use_force: bool = True
     use_e_per_atom: bool = False
     log_e_per_atom: bool = False  # affects metrics/reporting only
+
+def _ckpt_dir(model_dir: str) -> str:
+    return os.path.join(model_dir, "checkpoints")
+
+
+def _save_checkpoint(
+    *,
+    model,
+    optimizer,
+    scheduler,
+    params: dict,
+    step: int,
+    model_dir: str,
+    keep_last: int = 5,
+) -> str:
+    os.makedirs(_ckpt_dir(model_dir), exist_ok=True)
+
+    to_save = model.module if hasattr(model, "module") else model
+
+    ckpt = {
+        "step": int(step),
+        "model_state_dict": to_save.state_dict(),
+        "optimizer_state_dict": (optimizer.state_dict() if optimizer is not None else None),
+        "scheduler_state_dict": (scheduler.state_dict() if scheduler is not None else None),
+        "params": params,
+        "pytorch_version": torch.__version__,
+    }
+
+    path = os.path.join(_ckpt_dir(model_dir), f"ckpt_step_{int(step):09d}.pt")
+    torch.save(ckpt, path)
+
+    # Update "latest" pointer
+    latest_path = os.path.join(_ckpt_dir(model_dir), "latest.pt")
+    torch.save(ckpt, latest_path)
+
+    # Garbage-collect older checkpoints
+    ckpts = sorted(glob.glob(os.path.join(_ckpt_dir(model_dir), "ckpt_step_*.pt")))
+    if keep_last is not None and keep_last > 0 and len(ckpts) > keep_last:
+        for p in ckpts[:-keep_last]:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    return path
+
+
+def _load_latest_checkpoint(model_dir: str) -> Optional[dict]:
+    latest = os.path.join(_ckpt_dir(model_dir), "latest.pt")
+    if os.path.isfile(latest):
+        return torch.load(latest, map_location="cpu")
+
+    # Fallback: pick newest ckpt_step_*.pt
+    ckpts = sorted(glob.glob(os.path.join(_ckpt_dir(model_dir), "ckpt_step_*.pt")))
+    if ckpts:
+        return torch.load(ckpts[-1], map_location="cpu")
+    return None
+
+
+def _try_resume_from_checkpoint(
+    *,
+    model,
+    optimizer,
+    scheduler,
+    model_dir: str,
+    device: str,
+) -> int:
+    ckpt = _load_latest_checkpoint(model_dir)
+    if ckpt is None:
+        return 0
+
+    to_load = model.module if hasattr(model, "module") else model
+    to_load.load_state_dict(ckpt["model_state_dict"])
+
+    if optimizer is not None and ckpt.get("optimizer_state_dict") is not None:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    if scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+
+    # Move optimizer states to the chosen device (important!)
+    if optimizer is not None:
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(device)
+
+    # Return next step to run
+    last_step = int(ckpt.get("step", 0))
+    return last_step + 1
 
 def _flatten_forces(F: torch.Tensor) -> torch.Tensor:
     # Accept (B,N,3) or (BN,3) and return (BN,3)
@@ -243,19 +335,14 @@ def iter_batches(
             break
 
 
-
-def _repeat_yml_loader(yml_path, *, dataset_role, opts, nl_builder):
+def _repeat_batches_from_built_examples(built_examples, *, opts, nl_builder):
     """
-    Yield batches from a YAML-backed torch dataloader forever.
+    Repeat forever over an already-built (and ideally cached/materialized) example iterable.
 
-    This matches TF's dataset.repeat() behavior and prevents StopIteration
-    when max_steps exceeds a single pass over the cached dataset.
+    This avoids rebuilding datasets each epoch and makes RAM cache effective.
     """
     while True:
-        loader = make_torch_dataloader_from_yml(
-            yml_path, dataset_role=dataset_role, opts=opts, nl_builder=nl_builder
-        )
-        for batch in loader:
+        for batch in _iter_batches_from_examples(built_examples, opts=opts, nl_builder=nl_builder):
             yield batch
 
 
@@ -333,6 +420,11 @@ def train_and_evaluate(
     preprocess_flag = bool(kwargs.pop("preprocess", True))
     scratch_dir = kwargs.pop("scratch_dir", None)
     log_every = int(kwargs.pop("log_every", 100))
+    ckpt_every = int(kwargs.pop("ckpt_every", 1000))
+    keep_ckpts = int(kwargs.pop("keep_ckpts", 5))
+    resume = bool(kwargs.pop("resume", True))
+    eval_every = int(kwargs.pop("eval_every", 1000))   # how often to run eval during training
+    eval_batches = int(kwargs.pop("eval_batches", eval_steps))  # optional: cheaper periodic eval
 
 
     cfg = _get_potential_loss_config(params)
@@ -344,6 +436,7 @@ def train_and_evaluate(
         raise ValueError("params['model_dir'] is required for torch training.")
     os.makedirs(model_dir, exist_ok=True)
 
+
     writer = SummaryWriter(log_dir=model_dir)  # or model_dir/"logs"
     try: 
 
@@ -353,6 +446,20 @@ def train_and_evaluate(
 
         # Optimizer/scheduler/clipping from params.yml-style optimizer spec (generic for all torch nets)
         optim, scheduler, clip = build_optimizer_from_params(model, params, default_lr=lr)
+
+        # Resume from checkpoint 
+
+        start_step = 0
+        if resume:
+            start_step = _try_resume_from_checkpoint(
+                model=model,
+                optimizer=optim,
+                scheduler=scheduler,
+                model_dir=model_dir,
+                device=device,
+            )
+            if start_step > 0:
+                print(f"[torch] Resumed from checkpoint at step {start_step}")
 
         # ---- Build data iterators (numpy dict path OR YAML/CLI path) ----
         net_params = params.get("network", {}).get("params", {}) or {}
@@ -379,8 +486,8 @@ def train_and_evaluate(
                 atom_types=list(atom_types),
                 rc=float(rc),
                 scratch_dir=scratch_dir,
-                cache=True,
-                cache_ram=True,
+                cache=cache,
+                cache_ram=cache_ram,
                 device=device,
                 preprocess=preprocess_flag,
             )
@@ -390,15 +497,48 @@ def train_and_evaluate(
                 atom_types=list(atom_types),
                 rc=float(rc),
                 scratch_dir=scratch_dir,
-                cache=True,
-                cache_ram=True,
+                cache=cache,
+                cache_ram=cache_ram,
                 device=device,
                 preprocess=preprocess_flag,
             )
 
-            train_it = _repeat_yml_loader(train_yml, dataset_role="train", opts=train_opts, nl_builder=nl_builder)
-        
+            # ---- Build TRAIN once, then repeat batches forever ----
+            built_train = build_dataset(
+                train_yml,
+                options=BuildOptions(
+                    backend="torch",
+                    cache=train_opts.cache,
+                    scratch_dir=train_opts.scratch_dir,
+                    cache_ram=train_opts.cache_ram,
+                ),
+                dataset_role="train",
+            )
+            # IMPORTANT: make train examples re-iterable + make RAM cache truly effective
+            # Materialize only if explicitly requested (small datasets / tests).
+            materialize = bool(kwargs.pop("materialize_dataset", False))
+            if materialize:
+                built_train = list(built_train)
+
+            train_it = _repeat_batches_from_built_examples(
+                built_train, opts=train_opts, nl_builder=nl_builder
+            )
+
             use_yml_pipeline = True
+
+            # ---- Build EVAL once and materialize (re-iterable across periodic evals) ----
+            built_eval = build_dataset(
+                eval_yml,
+                options=BuildOptions(
+                    backend="torch",
+                    cache=eval_opts.cache,
+                    scratch_dir=eval_opts.scratch_dir,
+                    cache_ram=eval_opts.cache_ram,
+                ),
+                dataset_role="eval",
+            )
+            built_eval = list(built_eval)
+
         else:
             # Existing unit-test path: LJ toy numpy dict
             train_it = iter_batches(data, batch_size_train, shuffle=True, seed=seed, repeat=True)
@@ -431,12 +571,87 @@ def train_and_evaluate(
             params_path = os.path.join(model_dir, "params.yml")
             with open(params_path, "w") as f:
                 yaml.safe_dump(params, f)
+        
+        def _run_eval(n_batches: int) -> tuple[float, float]:
+            if hasattr(model, "eval"):
+                model.eval()
+
+            e_sq_sum = 0.0
+            e_count = 0
+            f_sq_sum = 0.0
+            f_count = 0
+
+            if use_yml_pipeline:
+                eval_iter = _iter_batches_from_examples(built_eval, opts=eval_opts, nl_builder=nl_builder)
+            else:
+                eval_iter = iter_batches(
+                    data,
+                    batch_size_eval,
+                    shuffle=False,
+                    seed=seed,
+                    repeat=False,
+                )
+
+            for _ in range(int(n_batches)):
+                try:
+                    batch = next(eval_iter)
+                except StopIteration:
+                    break
+
+                if use_yml_pipeline:
+                    tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
+                    E_true = batch["e_data"]
+                    F_true = _flatten_forces(batch["f_data"])
+                    coord = tensors["coord"]
+                    if not coord.requires_grad or not coord.is_leaf:
+                        coord = coord.detach().clone().requires_grad_(True)
+                        tensors["coord"] = coord
+                else:
+                    sb = _make_sparse_batch(batch, device=device)
+                    tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
+                    E_true = sb["_E_true"]
+                    F_true = _flatten_forces(sb["_F_true"])
+                    coord = tensors["coord"]
+                    if not coord.requires_grad or not coord.is_leaf:
+                        coord = coord.detach().clone().requires_grad_(True)
+                        tensors["coord"] = coord
+
+                E_pred = model(tensors)
+                if E_pred.ndim == 2 and E_pred.shape[1] == 1:
+                    E_pred = E_pred[:, 0]
+                elif E_pred.ndim != 1:
+                    raise ValueError(f"Expected E_pred shape (B,) or (B,1), got {tuple(E_pred.shape)}")
+
+                if cfg.log_e_per_atom:
+                    B = int(E_true.shape[0])
+                    counts = (
+                        torch.bincount(tensors["ind_1"][:, 0], minlength=B)
+                        .to(E_true.dtype)
+                        .clamp_min(1.0)
+                    )
+                    e_err = ((E_pred / counts) / e_unit) - (E_true / counts)
+                else:
+                    e_err = (E_pred / e_unit) - E_true
+
+                e_sq_sum += float((e_err ** 2).sum().item())
+                e_count += int(e_err.numel())
+
+                if cfg.use_force:
+                    dE_dR = torch.autograd.grad(E_pred.sum(), coord, create_graph=False)[0]
+                    F_pred = -dE_dR
+                    f_err = (F_pred / e_unit) - F_true
+                    f_sq_sum += float((f_err ** 2).sum().item())
+                    f_count += int(f_err.numel())
+
+            e_rmse = float(np.sqrt(e_sq_sum / max(e_count, 1)))
+            f_rmse = float(np.sqrt(f_sq_sum / max(f_count, 1))) if cfg.use_force else 0.0
+            return e_rmse, f_rmse    
 
         # ---- training loop ----
         if hasattr(model, "train"):
             model.train()
 
-        for step in range(int(max_steps)):
+        for step in range(start_step, int(max_steps)):
             batch = next(train_it)
 
             if use_yml_pipeline:
@@ -545,98 +760,33 @@ def train_and_evaluate(
                     writer.flush()
                 if scheduler is not None:
                     scheduler.step()
+                
+                if ckpt_every > 0 and (step % ckpt_every) == 0 and step > start_step:
+                    _save_checkpoint(
+                        model=model,
+                        optimizer=optim,
+                        scheduler=scheduler,
+                        params=params,
+                        step=step,
+                        model_dir=model_dir,
+                        keep_last=keep_ckpts,
+                    )
+                
+            # Periodic evaluation curve (held-out eval_yml / eval_it)
+            if eval_every > 0 and step > 0 and (step % eval_every) == 0:
+                e_rmse_now, f_rmse_now = _run_eval(eval_batches)
+                writer.add_scalar("eval/E_RMSE", e_rmse_now, step)
+                writer.add_scalar("eval/F_RMSE", f_rmse_now, step)
+                writer.flush()
+
+                if hasattr(model, "train"):
+                    model.train()  # switch back for next step
 
         # ---- evaluation loop (compute RMSE) ----
         if hasattr(model, "eval"):
             model.eval()
 
-        # We need gradients to compute forces, so we cannot wrap eval in torch.no_grad().
-        e_sq_sum = 0.0
-        e_count = 0
-        f_sq_sum = 0.0
-        f_count = 0
-
-        if use_yml_pipeline:
-            # Best practice (minimal change): build a fresh eval loader here and iterate safely.
-            eval_loader = make_torch_dataloader_from_yml(
-                eval_yml, dataset_role="eval", opts=eval_opts, nl_builder=nl_builder
-            )
-            eval_iter = iter(eval_loader)
-        else:
-            # Existing unit-test path: repeat=True iterator
-            eval_iter = eval_it
-
-        for _ in range(int(eval_steps)):
-            try:
-                batch = next(eval_iter)
-            except StopIteration:
-                # YAML eval set exhausted before eval_steps; stop cleanly.
-                break
-
-            if use_yml_pipeline:
-                # batch is already torch sparse(+maybe preprocessed)
-                if "e_data" not in batch or "f_data" not in batch:
-                    raise KeyError(
-                        "YAML Torch pipeline batch must include 'e_data' and 'f_data' for potential_model tests."
-                    )
-
-                # IMPORTANT: do not pass labels into the model input dict
-                tensors = {k: v for k, v in batch.items() if k not in ("e_data", "f_data")}
-                E_true = batch["e_data"]
-                F_true = batch["f_data"]
-                F_true = _flatten_forces(F_true)
-                coord = tensors["coord"]
-                if not coord.requires_grad or not coord.is_leaf:
-                    coord = coord.detach().clone().requires_grad_(True)
-                    tensors["coord"] = coord
-            else:
-                # LJ numpy dict path
-                sb = _make_sparse_batch(batch, device=device)
-                tensors = {k: v for k, v in sb.items() if not k.startswith("_")}
-                E_true = sb["_E_true"]
-                F_true = sb["_F_true"]
-                F_true = _flatten_forces(F_true)
-                coord = tensors["coord"]
-                if not coord.requires_grad or not coord.is_leaf:
-                    coord = coord.detach().clone().requires_grad_(True)
-                    tensors["coord"] = coord
-
-            E_pred = model(tensors)
-
-            # Accept (B,1) or (B,)
-            if E_pred.ndim == 2 and E_pred.shape[1] == 1:
-                E_pred = E_pred[:, 0]
-            elif E_pred.ndim != 1:
-                raise ValueError(f"Expected E_pred shape (B,) or (B,1), got {tuple(E_pred.shape)}")
-
-            # energy error for metrics
-            if cfg.log_e_per_atom:
-                B = int(E_true.shape[0])
-                counts = (
-                    torch.bincount(tensors["ind_1"][:, 0], minlength=B)
-                    .to(E_true.dtype)
-                    .clamp_min(1.0)
-                )
-                e_err = ((E_pred / counts) / e_unit) - (E_true / counts)
-            else:
-                e_err = (E_pred / e_unit) - E_true
-
-            e_sq_sum += float((e_err ** 2).sum().item())
-            e_count += int(e_err.numel())
-
-            if cfg.use_force:
-                dE_dR = torch.autograd.grad(E_pred.sum(), coord, create_graph=False)[0]
-                F_pred = -dE_dR
-                f_err = (F_pred / e_unit) - F_true
-                f_sq_sum += float((f_err ** 2).sum().item())
-                f_count += int(f_err.numel())
-
-        e_rmse = float(np.sqrt(e_sq_sum / max(e_count, 1)))
-        if cfg.use_force:
-            f_rmse = float(np.sqrt(f_sq_sum / max(f_count, 1)))
-        else:
-            f_rmse = 0.0
-        
+        e_rmse, f_rmse = _run_eval(eval_steps)
         writer.add_scalar("eval/E_RMSE", e_rmse, max_steps)
         writer.add_scalar("eval/F_RMSE", f_rmse, max_steps)
         writer.flush()
@@ -655,6 +805,16 @@ def train_and_evaluate(
                 "pytorch_version": torch.__version__,
             }
             torch.save(ckpt, os.path.join(model_dir, "model.pt"))
+
+        _save_checkpoint(
+            model=model,
+            optimizer=optim,
+            scheduler=scheduler,
+            params=params,
+            step=max_steps,
+            model_dir=model_dir,
+            keep_last=keep_ckpts,
+        )
     finally:
         writer.close()    
 
