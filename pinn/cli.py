@@ -15,6 +15,16 @@ from collections import defaultdict
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 CONTEXT_SETTINGS = dict()
 
+def _read_text(path: str) -> str:
+    """Read text from a local path or (if TF is installed) a TF-supported filesystem path."""
+    try:
+        from tensorflow.python.lib.io.file_io import FileIO  # type: ignore
+        with FileIO(path, "r") as f:
+            return f.read()
+    except Exception:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
 @click.group()
 def main():
     """PiNN CLI - Command line interface for PiNN"""
@@ -86,30 +96,80 @@ def train(params, model_dir, train_ds, eval_ds, batch, cache, preprocess,
     https://Teoroo-CMC.github.io/PiNN/latest/usage/cli/train/
     """
     import yaml, warnings
+    text = _read_text(params)
+
+    # Backend selection: environment variable is the project-wide switch
+    backend = os.environ.get("PINN_BACKEND", "tf").strip().lower()
+
+    # Load params YAML (works for both backends)
+    params = yaml.load(text, Loader=yaml.Loader)
+    if model_dir is not None:
+        params['model_dir'] = model_dir
+
+    # Default eval batch size mirrors existing behavior
+    if eval_bs is None:
+        eval_bs = batch
+
+    # ---- TORCH backend path ----
+    if backend == "torch":
+        # Keep semantics of scratch-dir:
+        # - None => cache in RAM (per CLI help)
+        # - provided => create a temp subdir and clean it after
+        from tempfile import mkdtemp
+        from shutil import rmtree
+
+        scratch_tmp = None
+        if scratch_dir is not None:
+            scratch_tmp = mkdtemp(prefix='pinn', dir=scratch_dir)
+
+        # 'init' currently uses TF dataset logic; make it explicit for torch
+        if init:
+            raise click.ClickException("--init is not supported for PINN_BACKEND=torch yet.")
+
+        # Torch runtime consumes dataset YAML paths directly
+        model = pinn.get_model(params)
+
+        pinn.train_and_evaluate(
+            model=model,
+            params=params,
+            data=None,  # not used when train_yml/eval_yml are provided
+            train_yml=train_ds,
+            eval_yml=eval_ds,
+            max_steps=int(train_steps),
+            eval_steps=int(eval_steps) if eval_steps is not None else 0,
+            batch_size_train=int(batch) if batch is not None else 1,
+            batch_size_eval=int(eval_bs) if eval_bs is not None else (int(batch) if batch is not None else 1),
+            shuffle_buffer=int(shuffle_buffer),
+            # Map CLI cache behavior to torch build_dataset caching:
+            scratch_dir=scratch_tmp,   # None => RAM cache; path => disk cache
+            cache=bool(cache),
+            cache_ram=(scratch_tmp is None),
+            preprocess=bool(preprocess),
+        )
+
+        if scratch_tmp is not None:
+            rmtree(scratch_tmp, ignore_errors=True)
+        return
+
+    # ---- TF backend path (existing behavior, unchanged) ----
     import tensorflow as tf
     from shutil import rmtree
     from tempfile import mkdtemp, mkstemp
-    from tensorflow.python.lib.io.file_io import FileIO
     from pinn import get_model, get_network
     from pinn.utils import init_params
     from pinn.io import load_tfrecord, sparse_batch
+
     index_warning = 'Converting sparse IndexedSlices'
     warnings.filterwarnings('ignore', index_warning)
     tf.get_logger().setLevel('ERROR')
 
-    with FileIO(params, 'r') as f:
-        params = yaml.load(f, Loader=yaml.Loader)
-    if model_dir is not None:
-        params['model_dir'] = model_dir
-
     if init:
         ds = load_tfrecord(train_ds)
         init_params(params, ds)
-    if eval_bs is None:
-        eval_bs = batch
 
     if scratch_dir is not None:
         scratch_dir = mkdtemp(prefix='pinn', dir=scratch_dir)
+
     def _dataset_fn(fname, batch):
         dataset = load_tfrecord(fname)
         if batch is not None:
@@ -131,22 +191,26 @@ def train(params, model_dir, train_ds, eval_ds, batch, cache, preprocess,
 
     train_fn = lambda: _dataset_fn(train_ds, batch).repeat().shuffle(shuffle_buffer)
     eval_fn = lambda: _dataset_fn(eval_ds, eval_bs)
-    config = tf.estimator.RunConfig(keep_checkpoint_max=max_ckpts,
-                                    log_step_count_steps=log_every,
-                                    save_summary_steps=log_every,
-                                    save_checkpoints_steps=ckpt_every)
+
+    config = tf.estimator.RunConfig(
+        keep_checkpoint_max=max_ckpts,
+        log_step_count_steps=log_every,
+        save_summary_steps=log_every,
+        save_checkpoints_steps=ckpt_every
+    )
 
     model = get_model(params, config=config)
+
     if early_stop:
-        stops = {s.split(':')[0]: float(s.split(':')[1])
-                 for s in early_stop.split(',')}
-        hooks = [tf.estimator.experimental.stop_if_no_decrease_hook(
-            model, k, v) for k,v in stops.items()]
+        stops = {s.split(':')[0]: float(s.split(':')[1]) for s in early_stop.split(',')}
+        hooks = [tf.estimator.experimental.stop_if_no_decrease_hook(model, k, v) for k, v in stops.items()]
     else:
-        hooks=None
+        hooks = None
+
     train_spec = tf.estimator.TrainSpec(input_fn=train_fn, max_steps=train_steps, hooks=hooks)
-    eval_spec  = tf.estimator.EvalSpec(input_fn=eval_fn, steps=eval_steps)
+    eval_spec = tf.estimator.EvalSpec(input_fn=eval_fn, steps=eval_steps)
     tf.estimator.train_and_evaluate(model, train_spec, eval_spec)
+
     if scratch_dir is not None:
         rmtree(scratch_dir)
 
