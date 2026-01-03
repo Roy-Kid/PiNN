@@ -19,39 +19,43 @@ class PiNetPotentialTorch(nn.Module):
         self.e_unit = float(e_unit)
 
     def forward(self, tensors: dict) -> torch.Tensor:
-        """
-        Returns:
-            energy per structure, shape (n_struct,)
-            in ASE energy units
-        """
-        # 1. atomic energy contributions
-        # shape: (n_atoms, 1)
-        e_atom = self.net(tensors)
+        """Compute per-structure energy in the same units/scale as TF PREDICT.
 
+        TF reference (pinn/models/potential.py, ModeKeys.PREDICT):
+          pred = pred / e_scale
+          pred += atomic_dress(...)
+          pred *= e_unit
+
+        Returns:
+            1D tensor of shape (n_struct,) in ASE energy units (eV by default).
+        """
+        e_atom = self.net(tensors)
         if e_atom.ndim == 2 and e_atom.shape[1] == 1:
             e_atom = e_atom[:, 0]
 
-        # 2. pool atoms → structures
         ind_1 = tensors["ind_1"][:, 0]
         n_struct = int(ind_1.max()) + 1 if ind_1.numel() else 0
 
-        e_struct = torch.zeros(
-            n_struct,
-            device=e_atom.device,
-            dtype=e_atom.dtype,
-        )
+        e_struct = torch.zeros(n_struct, device=e_atom.device, dtype=e_atom.dtype)
         e_struct.index_add_(0, ind_1, e_atom)
 
-        # 3. energy dressing (tensor form, no Python loops over atoms)
+        # --- Match TF predict post-processing ---
+        # 1) undo training scaling
+        if self.e_scale != 1.0:
+            e_struct = e_struct / self.e_scale
+
+        # 2) energy dressing in label units (same place TF adds it)
         if self.e_dress:
             elems = tensors["elems"]
             dress_atom = torch.zeros_like(e_atom)
             for z, val in self.e_dress.items():
                 dress_atom = dress_atom + (elems == z).to(e_atom.dtype) * val
-            e_struct = e_struct + torch.zeros_like(e_struct).index_add_(0, ind_1, dress_atom)
+            dress_struct = torch.zeros_like(e_struct).index_add_(0, ind_1, dress_atom)
+            e_struct = e_struct + dress_struct
 
-        # 4. scaling + units
-        e_struct = e_struct * self.e_unit
+        # 3) unit conversion
+        if self.e_unit != 1.0:
+            e_struct = e_struct * self.e_unit
 
         return e_struct
 

@@ -58,9 +58,35 @@ class TorchDataOptions:
 
 
 def _to_torch(x: Any, device: torch.device) -> torch.Tensor:
-    """Convert numpy/scalar/list/torch to torch tensor on device."""
+    """Convert input to a torch.Tensor on `device` safely.
+
+    This function is the NumPy→Torch boundary for the input pipeline.
+
+    Why we do extra checks:
+    - `torch.as_tensor(numpy_array)` may share memory with NumPy.
+    - Arrays loaded from `.npz`/memmap/views can be non-writable.
+    - If any downstream code performs in-place writes on a Tensor backed by
+      a non-writable NumPy buffer, behavior is undefined (PyTorch warns).
+
+    Policy:
+    - If `x` is a torch.Tensor: move to device (no copy unless needed).
+    - If `x` is a NumPy array (or memmap) and is not writeable: copy once.
+    - Otherwise: use `torch.as_tensor` for zero-copy when safe.
+
+    Args:
+        x: torch.Tensor, numpy array/memmap, scalar, list, etc.
+        device: Target torch device.
+
+    Returns:
+        torch.Tensor on `device`.
+    """
     if isinstance(x, torch.Tensor):
         return x.to(device)
+
+    # Avoid undefined behavior from non-writable NumPy buffers (common for np.load/.npz).
+    if isinstance(x, np.ndarray) and not x.flags.writeable:
+        x = np.array(x, copy=True)
+
     return torch.as_tensor(x, device=device)
 
 

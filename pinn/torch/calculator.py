@@ -79,12 +79,24 @@ class TorchPiNNCalc(Calculator):
 
     implemented_properties = ["energy", "forces", "stress"]
 
-    def __init__(self, model, *, device="auto", virial_mode="diff", **kwargs):
+    def __init__(self, model, *, device="auto", virial_mode="diff", to_eV: float = 1.0, **kwargs):
+        """ASE calculator for Torch PiNN.
+
+        Args:
+            model: Torch potential model. Its native output units can be arbitrary.
+            device: "auto"|"cpu"|"cuda"|...
+            virial_mode: stress mode selection (kept as-is).
+            to_eV: Multiplicative conversion factor from the model's native *energy* units
+                to eV. Forces and stresses are scaled consistently because they are
+                derivatives of energy.
+                Example: kcal/mol -> eV: to_eV = 0.0433641153088
+        """
         super().__init__(**kwargs)
         dev = resolve_device(device)
         self.device = str(dev)
         self.model = model.to(self.device)
         self.virial_mode = virial_mode
+        self.to_eV = float(to_eV)
 
     def calculate(self, atoms=None, properties=("energy", "forces", "stress"), system_changes=all_changes):
         """Run torch model and populate ASE results dict.
@@ -158,6 +170,8 @@ class TorchPiNNCalc(Calculator):
 
         # Model already returns total energy in ASE units
         E = self.model(tensors)
+        if self.to_eV != 1.0:
+            E = E * self.to_eV
 
         if E.ndim == 0:
             E = E.view(1)
@@ -267,6 +281,8 @@ class TorchPiNNCalc(Calculator):
                     t = preprocess(t)
                     t["_preprocessed"] = True
                     E_new = self.model(t)
+                    if self.to_eV != 1.0:
+                         E_new = E_new * self.to_eV
                     return E_new.view(-1).sum()
 
                 # Symmetric strain basis for Voigt order: xx, yy, zz, yz, xz, xy
