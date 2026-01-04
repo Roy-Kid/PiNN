@@ -4,6 +4,8 @@ import tensorflow as tf
 import numpy as np
 from functools import wraps
 
+# pinn/torch/utils.py  (new file or existing utils module)
+
 
 def init_params(params, dataset):
     """Initlaize the parameters with a dataset
