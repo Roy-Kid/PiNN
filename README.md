@@ -67,8 +67,9 @@ Since PiNN 1.0 the documentation is hosted on [Github pages](https://teoroo-cmc.
 
 ### Implemented models
 
-- Potential model
+- Interatomic potential model
 - Dipole model
+- Quadrupole model
 - Polarizability model
 
 ## Community
