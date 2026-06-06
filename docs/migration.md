@@ -4,6 +4,59 @@ Since version 2.x, a modularized design, **PiNet2**, has been implemented for eq
 
 A workflow using [Nextflow](https://www.nextflow.io/docs/latest/index.html) is also integrated, enabling model training on clusters via SLURM or other resource management systems. Examples can be found in the `nextflow.config` file and the [notebook](./notebooks/More_on_training.ipynb).
 
+## Upgrading the TensorFlow backend to 2.15
+
+PiNN's supported TensorFlow window has moved up to **TensorFlow 2.15**
+(Python 3.9–3.11, `numpy<2`). This is the last release that still ships
+`tf.estimator` and the legacy Keras optimizers — both removed in TF 2.16 — while
+also supporting recent GPUs (NVIDIA Hopper / `sm_90`, e.g. GH200). PiNN's
+training loop is built on `tf.estimator`, so 2.15 is the ceiling until the
+estimator path is rewritten.
+
+### Installing
+
+```sh
+pip install -e '.[cpu]'   # tensorflow-cpu >=2.15,<2.16
+pip install -e '.[gpu]'   # tensorflow     >=2.15,<2.16  (x86_64 CUDA wheel)
+```
+
+!!! note "aarch64 GPUs (e.g. GH200)"
+    There is **no GPU TensorFlow wheel for aarch64** on PyPI or conda-forge
+    (both are CPU-only). The only aarch64 GPU build of TF 2.15 is the NVIDIA NGC
+    container `nvcr.io/nvidia/tensorflow:24.03-tf2-py3`; `Dockerfile.gpu` /
+    `Singularity.gpu` are based on it. On x86_64 the normal `tensorflow` CUDA
+    wheel works.
+
+### What changed under the hood
+
+Most changes are internal; existing parameter files and trained 2.x models keep
+working. The notable points:
+
+- **Optimizers.** TF ≥2.11 returns the new-style Keras optimizer from
+  `tf.keras.optimizers.get`, which does not support the
+  `tf.gradients` + `apply_gradients` graph-mode pattern PiNN uses inside the
+  estimator. `pinn.optimizers.get` now requests the *legacy* optimizer
+  (`deserialize(..., use_legacy_optimizer=True)`) automatically. No change is
+  needed in your input files; `Adam`, `SGD`, etc. behave as before.
+- **ASE calculator.** TF ≥2.15 prefetches `tf.data` pipelines more
+  aggressively. The predict `input_fn` now disables autotune/prefetch so the
+  cached predictor always reads the freshly-updated atoms (otherwise a
+  `calculate()` could return the *previous* step's energy/forces).
+- **h5py 3.** TF 2.15 ships h5py ≥3, which removed `Dataset.value`. The ANI-1
+  loader now uses `dataset[()]`.
+- **numpy ≥1.24.** The removed aliases `np.int` / `np.float` are gone from the
+  code (use the Python built-ins or sized dtypes like `np.int32`).
+- **tfrecord spec.** `write_tfrecord` now reads `dataset.element_spec` (public)
+  instead of the private `DatasetSpec._serialize()`.
+
+### Behavioural note: RNG determinism
+
+`tf.random.set_seed(...)` no longer makes two independently-constructed Keras
+models share weights the way it did on older TF. If you relied on that for
+reproducibility, set the seed and then **copy weights explicitly**
+(`model_b.set_weights(model_a.get_weights())`), or seed the layer initializers
+directly.
+
 # Migrating to PiNN 1.x (TF2)
 
 Since version 1.x, PiNN switched to TensorFlow 2 as a backend, this introduces

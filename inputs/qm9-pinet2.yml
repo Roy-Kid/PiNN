@@ -1,0 +1,36 @@
+# QM9 U0, energy-only (no force) -- PiNet2 with rank=3.
+# Network mirrors md17-pinet2.yml (PiNet2 rank 3); model is energy-only as QM9
+# has no forces. e_dress / atom_types are filled by PiNN from the data.
+model:
+  name: potential_model
+  params:
+    use_force: false
+    e_loss_multiplier: 1.0
+    f_loss_multiplier: 0.0
+    e_scale: 1.0
+    e_unit: 1.0
+    use_e_per_atom: false
+    log_e_per_atom: true
+network:
+  name: PiNet2
+  params:
+    depth: 5
+    rc: 4.5
+    n_basis: 10
+    basis_type: gaussian
+    pi_nodes: [64]
+    pp_nodes: [64,64,64,64]
+    ii_nodes: [64,64,64,64]
+    out_nodes: [64]
+    weighted: False
+    rank: 3
+optimizer:
+  class_name: Adam
+  config:
+    global_clipnorm: 0.01
+    learning_rate:
+      class_name: ExponentialDecay
+      config:
+        decay_rate: 0.994
+        decay_steps: 10000
+        initial_learning_rate: 0.0001

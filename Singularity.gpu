@@ -1,0 +1,28 @@
+# Apptainer/Singularity GPU image for PiNN — mirrors Dockerfile.gpu.
+# The cluster has no docker/podman, so build the SIF directly with apptainer:
+#   cd <repo> && apptainer build /path/on/allowed/fs/pinn-gpu.sif Singularity.gpu
+# (%files paths are resolved relative to this build CWD = the repo root.)
+# Store the SIF on an apptainer-allowed path (/nobackup/proj/..., /scratch — NOT
+# $HOME) and run with --nv on a GH200 node.
+Bootstrap: docker
+From: nvcr.io/nvidia/tensorflow:24.03-tf2-py3
+
+%files
+    pinn /opt/src/pinn/pinn
+    setup.py /opt/src/pinn/setup.py
+    requirements-dev.txt /opt/src/pinn/requirements-dev.txt
+    requirements-doc.txt /opt/src/pinn/requirements-doc.txt
+    requirements-extra.txt /opt/src/pinn/requirements-extra.txt
+
+%post
+    # NGC already provides TF 2.15 + numpy/scipy/h5py; add PiNN's missing deps,
+    # then PiNN itself --no-deps so pip won't pull a second numpy/TensorFlow.
+    pip install --no-cache-dir 'ase~=3.22.0' 'click~=7.0' 'pyyaml>=6.0.1'
+    pip install --no-cache-dir --no-deps /opt/src/pinn
+
+%runscript
+    exec pinn "$@"
+
+%labels
+    pinn.tensorflow 2.15.0
+    pinn.base nvcr.io/nvidia/tensorflow:24.03-tf2-py3

@@ -25,7 +25,9 @@ def write_tfrecord(fname, dataset, log_every=100, pre_fn=None):
     if pre_fn:
         dataset = dataset.map(pre_fn)
 
-    spec = tf.data.DatasetSpec.from_value(dataset)._serialize()[0]
+    # element_spec is the public form of the (private) DatasetSpec._serialize();
+    # for a dict dataset it is {key: TensorSpec}, which is what we need below.
+    spec = dataset.element_spec
     # Sanity check
     assert (type(spec) == dict and all(type(v) != dict for v in spec.values())),\
         "Only dataset of non-nested dictionary is supported."

@@ -32,7 +32,7 @@ def _stress_loader(index):
         data.append(l.split()[1:])
     unit = -1e9*2.2937e17*1e-30 # GPa -> Hartree/Ang^3
     f.close()
-    return {'s_data': np.array(data, np.float)*unit}
+    return {'s_data': np.array(data, float)*unit}
 
 def _energy_indexer(files):
     import mmap, re
@@ -68,7 +68,7 @@ def _force_loader(index):
         data.append(l.split()[3:])
         l = f.readline().strip()
     f.close()
-    return {'f_data': np.array(data, np.float)/bohr2ang}
+    return {'f_data': np.array(data, float)/bohr2ang}
 
 def _coord_indexer(files):
     import mmap
@@ -97,8 +97,8 @@ def _coord_loader(index):
         elems.append(atomic_numbers[line[0]])
         coord.append(line[1:4])
     f.close()
-    return {'elems': np.array(elems, np.float),
-            'coord': np.array(coord, np.float)}
+    return {'elems': np.array(elems, float),
+            'coord': np.array(coord, float)}
 
 
 indexers = {'force': _force_indexer,

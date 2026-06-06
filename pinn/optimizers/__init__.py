@@ -21,4 +21,17 @@ def get(optimizer):
             return EKF(**optimizer['config'])
         if optimizer['class_name']=='gEKF':
             return gEKF(**optimizer['config'])
+    # PiNN trains in estimator graph mode (tf.gradients + manually assigned
+    # .iterations + apply_gradients, see pinn.models.base.get_train_op). TF>=2.11
+    # made tf.keras.optimizers.get() return the new-style Keras optimizer, which
+    # does not support that v1 pattern. Request the legacy optimizer wherever the
+    # API exists (TF 2.11-2.15); on older TF (<2.11) there is only one optimizer.
+    import inspect
+    if 'use_legacy_optimizer' in inspect.signature(
+            tf.keras.optimizers.deserialize).parameters:
+        if isinstance(optimizer, str):
+            optimizer = {'class_name': optimizer, 'config': {}}
+        if isinstance(optimizer, dict):
+            return tf.keras.optimizers.deserialize(
+                optimizer, use_legacy_optimizer=True)
     return tf.keras.optimizers.get(optimizer)
