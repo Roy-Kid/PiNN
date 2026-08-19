@@ -3,8 +3,8 @@
 **using pip**
 
 ```bash
-git clone https://github.com/Teoroo-CMC/PiNN.git -b TF2
-pip install -e PiNN[gpu]
+git clone https://github.com/Teoroo-CMC/PiNN.git
+pip install -e 'PiNN[gpu]'   # or 'PiNN[cpu]'; needs Python 3.9–3.11, TF 2.15
 pinn -h
 ```
 
@@ -18,23 +18,21 @@ Extra dependencies can be specified:
 
 **using container** 
 
-PiNN provides two built docker images, which can be converted to singularity
-images without much effort:
+PiNN provides two published docker images, which can be converted to
+Singularity/Apptainer images without much effort:
 
 ```bash
 singularity build pinn.sif docker://tecatuu/pinn:master-gpu
 ./pinn.sif -h
 ```
 
-- `:master-cpu` is much smaller, it comes without GPU support
-- `:master-gpu` is the version with GPU support
+- `:master-cpu` — `tensorflow/tensorflow:2.15.0`, no GPU
+- `:master-gpu` — NGC `nvcr.io/nvidia/tensorflow:24.03-tf2-py3` (TF 2.15 + CUDA 12.4; x86_64 and aarch64/GH200)
 
-Extra dependencies like `Jupyter` are included in the image, for a quick 
-development environment:
-
-```bash
-singularity run pinn.sif jupyter notebook
-```
+Both images run the `pinn` CLI. Jupyter is not bundled; install it locally if
+you want a notebook environment. To build the images yourself, use `Dockerfile`
+/ `Dockerfile.gpu`, or the in-repo `Singularity` / `Singularity.gpu` defs on
+clusters without Docker.
 
 ## Configuration
 In PiNN, a model consists of two essential parts, the network and the model. The

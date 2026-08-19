@@ -1,18 +1,15 @@
 name: Build and Test
 on:
   push:
+  pull_request:
     branches:
       - master
-    tags:
-      - v*
-  pull_request: 
-    branches: 
-      - master
+  workflow_dispatch:
 
-# Image publish + docs deploy are a Teoroo-CMC/PiNN privilege.
-# Forks and pull_request runs still *build* the images (to catch a broken
-# Dockerfile) but never log in or push. The second Docker Hub org jobs are
-# publish-only, so they are skipped outside the canonical repo.
+# Image publish + docs deploy are a Teoroo-CMC/PiNN privilege, and only on
+# master / version tags. Forks, PRs, and feature-branch pushes still *build*
+# the images (to catch a broken Dockerfile) but never log in or push. The
+# second Docker Hub org jobs are publish-only.
 
 jobs:
   pytest:
@@ -54,7 +51,7 @@ jobs:
     needs: pytest
     runs-on: ubuntu-latest
     env:
-      PUSH_IMAGE: ${{ github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' }}
+      PUSH_IMAGE: ${{ github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
@@ -73,7 +70,7 @@ jobs:
           tags: ${{ env.PUSH_IMAGE == 'true' && format('{0}:{1}-cpu', secrets.DOCKERHUB_REPO, env.TAG) || format('pinn:{0}-cpu', env.TAG) }}
   build-cpu-to-new-org:
     name: Build docker (cpu) - new
-    if: github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push'
+    if: github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     needs: pytest
     runs-on: ubuntu-latest
     steps:
@@ -96,10 +93,15 @@ jobs:
     needs: pytest
     runs-on: ubuntu-latest
     env:
-      PUSH_IMAGE: ${{ github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' }}
+      PUSH_IMAGE: ${{ github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h
       - name: Get Tag
         run: echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_ENV
       - name: Login to Docker Hub
@@ -116,12 +118,17 @@ jobs:
           tags: ${{ env.PUSH_IMAGE == 'true' && format('{0}:{1}-gpu', secrets.DOCKERHUB_REPO, env.TAG) || format('pinn:{0}-gpu', env.TAG) }}
   build-gpu-to-new-org:
     name: Build docker (gpu) - new
-    if: github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push'
+    if: github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     needs: pytest
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h
       - name: Get Tag
         run: echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_ENV
       - name: Login to Docker Hub
@@ -137,7 +144,7 @@ jobs:
           tags: ${{ vars.NEW_DOCKERHUB_REPO }}:${{ env.TAG }}-gpu
   deploy-docs:
     name: Deploy docs
-    if: github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push'
+    if: github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     needs: pytest
     runs-on: ubuntu-latest
     steps:

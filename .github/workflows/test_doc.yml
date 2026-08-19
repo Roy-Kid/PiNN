@@ -3,7 +3,11 @@ name: Test Documentation Build
 on:
   push:
     branches-ignore:
-      - main
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
 
 jobs:
   build:
@@ -11,9 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        py-version: ["3.9", "3.10"]
+        py-version: ["3.9", "3.11"]
     steps:
-      - name: Checkout master
+      - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0 # see https://github.com/jimporter/mike/issues/28
@@ -25,10 +29,10 @@ jobs:
           cache-dependency-path: "requirements*.txt"
       - name: Install PiNN
         run: |
-          pip install tensorflow==2.8 'protobuf<3.20'
+          pip install 'tensorflow==2.15.*' 'numpy<2'
           pip install -r requirements-dev.txt
           pip install -r requirements-doc.txt
           pip install .
-      - name: Deploy docs
+      - name: Build docs
         run: |
           mkdocs build

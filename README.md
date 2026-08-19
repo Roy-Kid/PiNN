@@ -37,13 +37,19 @@ pip install -e .
 ```
 
 2) Alternatively, you can use the [docker
-image](https://hub.docker.com/r/tecatuu/pinn/tags) to contain the environment. If you prefer
-singularity, you need build a singularity image from the docker image:
+image](https://hub.docker.com/r/tecatuu/pinn/tags). The CPU image is based on
+`tensorflow/tensorflow:2.15.0`; the GPU image on NVIDIA NGC
+`nvcr.io/nvidia/tensorflow:24.03-tf2-py3` (x86_64 and aarch64/GH200). Both
+images expose the `pinn` CLI (Jupyter is no longer bundled).
 
 ``` sh
-singularity build pinn.sif docker://tecatuu/pinn:master-gpu (or master-cpu)
-singularity exec pinn.sif jupyter notebook # this starts a jupyter notebook server
-./pinn.sif --help # this invokes the pinn CLI
+# published tags (built on Teoroo-CMC/PiNN master / version tags)
+singularity build pinn.sif docker://tecatuu/pinn:master-gpu   # or master-cpu
+./pinn.sif --help
+
+# or build from this repo (Apptainer defs: Singularity / Singularity.gpu)
+docker build -t pinn:cpu .
+docker build -f Dockerfile.gpu -t pinn:gpu .
 ```
 
 ## Documentation
