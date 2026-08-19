@@ -36,8 +36,9 @@ documented in this change log.
     * In-repo `Singularity` / `Singularity.gpu` defs for clusters without Docker.
 - CI / packaging:
     * Test matrix is Python 3.9–3.11 × TensorFlow 2.15.
-    * Docker image push and docs deploy run only from `Teoroo-CMC/PiNN` on
-      `master` / version tags; forks still *build* the images.
+    * Docker CPU image push and docs deploy run only from `Teoroo-CMC/PiNN` on
+      `master` / version tags; forks still *build* the CPU image. GPU images
+      are built from `Dockerfile.gpu` / `Singularity.gpu` outside GitHub Actions.
     * `setup.py` extras: `.[cpu]` / `.[gpu]` pin `tensorflow>=2.15,<2.16`.
 - Workflow:
     * Nextflow `arrhenius` profile (GPU train / CPU data-prep via Apptainer).
