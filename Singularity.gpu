@@ -15,10 +15,9 @@ From: nvcr.io/nvidia/tensorflow:24.03-tf2-py3
     requirements-extra.txt /opt/src/pinn/requirements-extra.txt
 
 %post
-    # NGC already provides TF 2.15 + numpy/scipy/h5py; add PiNN's missing deps,
-    # then PiNN itself --no-deps so pip won't pull a second numpy/TensorFlow.
-    pip install --no-cache-dir 'ase~=3.22.0' 'click~=7.0' 'pyyaml>=6.0.1'
-    pip install --no-cache-dir --no-deps /opt/src/pinn
+    # NGC already provides TF 2.15 + numpy/scipy/h5py. Remaining runtime deps
+    # come from setup.py; only-if-needed keeps NGC numpy (satisfies numpy<2).
+    pip install --no-cache-dir --upgrade-strategy only-if-needed /opt/src/pinn
 
 %runscript
     exec pinn "$@"

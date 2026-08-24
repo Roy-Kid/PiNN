@@ -1,10 +1,16 @@
 # Quick start
 ## Installation
+
+Requires Python 3.9–3.11, TensorFlow 2.15, ASE ≥ 3.25, and NumPy 1.x.
+ASE, PyYAML, Click, and NumPy are declared in `setup.py` / `environment.yml`
+(not in the container files).
+
 **using pip**
 
 ```bash
 git clone https://github.com/Teoroo-CMC/PiNN.git
-pip install -e 'PiNN[gpu]'   # or 'PiNN[cpu]'; needs Python 3.9–3.11, TF 2.15
+cd PiNN
+pip install -e '.[gpu]'   # or '.[cpu]'
 pinn -h
 ```
 
@@ -13,10 +19,17 @@ Extra dependencies can be specified:
 - `[gpu]` or `[cpu]`: cpu or gpu version of TensorFlow
 - `[dev]`: development requirements for testing
 - `[doc]`: documentation requirements
-- `[extra]`: extra requirements (Jupyter, pymatgen, etc) 
+- `[extra]`: extra requirements (Jupyter, pymatgen, etc)
 
+**using conda**
 
-**using container** 
+```bash
+conda env create -f environment.yml
+conda activate pinn
+pip install -e .
+```
+
+**using container**
 
 PiNN provides two published docker images, which can be converted to
 Singularity/Apptainer images without much effort:
@@ -30,9 +43,16 @@ singularity build pinn.sif docker://tecatuu/pinn:master-gpu
 - `:master-gpu` — NGC `nvcr.io/nvidia/tensorflow:24.03-tf2-py3` (TF 2.15 + CUDA 12.4; x86_64 and aarch64/GH200)
 
 Both images run the `pinn` CLI. Jupyter is not bundled; install it locally if
-you want a notebook environment. To build the images yourself, use `Dockerfile`
-/ `Dockerfile.gpu`, or the in-repo `Singularity` / `Singularity.gpu` defs on
-clusters without Docker.
+you want a notebook environment. Runtime dependencies come from `setup.py`.
+To build the images yourself:
+
+```bash
+docker build -t pinn:cpu .
+docker build -f Dockerfile.gpu -t pinn:gpu .
+# clusters without Docker:
+apptainer build /path/on/allowed/fs/pinn-cpu.sif Singularity
+apptainer build /path/on/allowed/fs/pinn-gpu.sif Singularity.gpu
+```
 
 ## Configuration
 In PiNN, a model consists of two essential parts, the network and the model. The

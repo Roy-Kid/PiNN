@@ -12,7 +12,7 @@ This project was initiated by [Yunqi Shao][yqshao]. The code is currently mainta
 ## Requirements
 
 - Python >= 3.9 and < 3.12
-- [ASE](https://wiki.fysik.dtu.dk/ase/) ~= 3.22
+- [ASE](https://wiki.fysik.dtu.dk/ase/) >= 3.25
 - [PyYAML](https://pyyaml.org/) ~= 6.0.1
 - [TensorFlow](https://www.tensorflow.org/install) >= 2.15 and < 2.16<sup>[3](#fn3),[4](#fn4)</sup>
 - NumPy < 2
@@ -47,9 +47,12 @@ images expose the `pinn` CLI (Jupyter is no longer bundled).
 singularity build pinn.sif docker://tecatuu/pinn:master-gpu   # or master-cpu
 ./pinn.sif --help
 
-# or build from this repo (Apptainer defs: Singularity / Singularity.gpu)
+# or build from this repo (runtime deps come from setup.py)
 docker build -t pinn:cpu .
 docker build -f Dockerfile.gpu -t pinn:gpu .
+# clusters without Docker:
+apptainer build /path/on/allowed/fs/pinn-cpu.sif Singularity
+apptainer build /path/on/allowed/fs/pinn-gpu.sif Singularity.gpu
 ```
 
 ## Documentation

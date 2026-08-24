@@ -15,11 +15,11 @@
 #   apptainer exec --nv /scratch/$USER/pinn-gpu.sif pinn --help
 FROM nvcr.io/nvidia/tensorflow:24.03-tf2-py3
 
-# PiNN's runtime deps the NGC image lacks (it already provides TF, numpy, scipy,
-# h5py). Install these first, then PiNN itself with --no-deps so pip does not pull
-# a second numpy / TensorFlow over the NGC-tuned ones.
+# NGC already provides TF, numpy, scipy, h5py. Runtime deps (ase, click, pyyaml)
+# come from setup.py — do not pin them here. TensorFlow is an extra so NGC TF is
+# not reinstalled; pip's default only-if-needed strategy keeps a numpy that
+# already satisfies numpy<2.
 COPY . /opt/src/pinn
-RUN pip install --no-cache-dir 'ase~=3.22.0' 'click~=7.0' 'pyyaml>=6.0.1' && \
-    pip install --no-cache-dir --no-deps /opt/src/pinn
+RUN pip install --no-cache-dir --upgrade-strategy only-if-needed /opt/src/pinn
 
 ENTRYPOINT ["pinn"]

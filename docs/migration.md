@@ -16,8 +16,9 @@ estimator path is rewritten.
 ### Installing
 
 ```sh
-pip install -e '.[cpu]'   # tensorflow-cpu >=2.15,<2.16
+pip install -e '.[cpu]'   # tensorflow-cpu >=2.15,<2.16; ASE >=3.25 from setup.py
 pip install -e '.[gpu]'   # tensorflow     >=2.15,<2.16  (x86_64 CUDA wheel)
+# or: conda env create -f environment.yml && pip install -e .
 ```
 
 !!! note "aarch64 GPUs (e.g. GH200)"
@@ -38,6 +39,10 @@ working. The notable points:
   estimator. `pinn.optimizers.get` now requests the *legacy* optimizer
   (`deserialize(..., use_legacy_optimizer=True)`) automatically. No change is
   needed in your input files; `Adam`, `SGD`, etc. behave as before.
+- **ASE ≥3.25.** The supported ASE window is now `>=3.25.0` so NVT runs can
+  use the Bussi thermostat (`ase.md.bussi.Bussi`), which is not in 3.22.
+  The floor lives in `setup.py` and `environment.yml` only; containers
+  install PiNN from those files.
 - **ASE calculator.** TF ≥2.15 prefetches `tf.data` pipelines more
   aggressively. The predict `input_fn` now disables autotune/prefetch so the
   cached predictor always reads the freshly-updated atoms (otherwise a

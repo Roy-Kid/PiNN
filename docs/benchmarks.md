@@ -98,11 +98,12 @@ from the `PiNN` folder.  You will probably need to set up the
 development environments on an HPC cluster (e.g. ALVIS):
 
 ``` bash
-ml TensorFlow/2.6.0-foss-2021a-CUDA-11.3.1
-python -m venv $HOME/pinn-tf26
-source $HOME/pinn-tf26/bin/activate
-git clone https://github.com/Teoroo-CMC/PiNN.git && pip install -e PiNN
+ml TensorFlow/2.15   # replace with the site module that provides TF 2.15
+python -m venv $HOME/pinn-tf215
+source $HOME/pinn-tf215/bin/activate
+git clone https://github.com/Teoroo-CMC/PiNN.git
 cd PiNN
+pip install -e '.[gpu]'   # or '.[cpu]'; ASE ≥3.25 comes from setup.py
 ```
 
 And run the benchmark using a corresponding profile:

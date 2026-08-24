@@ -27,6 +27,9 @@ documented in this change log.
       estimator graph-mode `tf.gradients` + `apply_gradients` loop still works.
     * ASE calculator disables `tf.data` prefetch/autotune; otherwise
       `calculate()` could return the previous step's energy/forces.
+    * Default ASE raised to **≥3.25.0** in `setup.py` / `environment.yml`
+      (Bussi NVT thermostat; 3.22.0 does not provide it). Containers install
+      PiNN from those files and do not re-pin ASE.
     * I/O: TFRecord spec from public `dataset.element_spec`; ANI-1 loader uses
       h5py 3 (`dataset[()]`); removed `np.int` / `np.float` aliases.
 - Containers:
