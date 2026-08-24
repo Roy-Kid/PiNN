@@ -177,7 +177,7 @@ def log(logdir, tag, fmt):
     steps = [logs[k][:,0] for k in keys]
     data = [logs[k][:,1] for k in keys]
     steps, rows = np.unique(np.concatenate(steps), return_inverse=True)
-    cols = np.concatenate([np.full_like(v, i, np.int) for i, v in enumerate(data)])
+    cols = np.concatenate([np.full_like(v, i, int) for i, v in enumerate(data)])
 
     tmp = np.full([len(steps), len(logs.values())], np.nan)
     tmp[rows, cols] = np.concatenate(data)

@@ -9,18 +9,20 @@ meaninig the same molecule shows up in only one of the splitted datasets.
 note that this scheme is not identical to the original ANI-1 paper.
 """
 
-
+import h5py
+import numpy as np
 
 
 def _ani_generator(sample_list):
     from ase.data import atomic_numbers as atomic_num
     for sample in sample_list:
-        data = h5py.File(sample[0])[sample[1]]
-        coord = data['coordinates'].value
-        elems = data['species'].value
+        data = h5py.File(sample[0], 'r')[sample[1]]
+        # h5py>=3 (ships with TF 2.15) removed Dataset.value; use [()].
+        coord = data['coordinates'][()]
+        elems = data['species'][()]
         elems = np.array([atomic_num[e.decode()] for e in elems])
         elems = np.tile(elems[np.newaxis, :], [coord.shape[0], 1])
-        e_data = data['energies'].value
+        e_data = data['energies'][()]
         yield {'coord': coord, 'elems': elems, 'e_data': e_data}
 
 

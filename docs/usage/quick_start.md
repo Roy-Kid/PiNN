@@ -1,10 +1,16 @@
 # Quick start
 ## Installation
+
+Requires Python 3.9–3.11, TensorFlow 2.15, ASE ≥ 3.25, and NumPy 1.x.
+ASE, PyYAML, Click, and NumPy are declared in `setup.py` / `environment.yml`
+(not in the container files).
+
 **using pip**
 
 ```bash
-git clone https://github.com/Teoroo-CMC/PiNN.git -b TF2
-pip install -e PiNN[gpu]
+git clone https://github.com/Teoroo-CMC/PiNN.git
+cd PiNN
+pip install -e '.[gpu]'   # or '.[cpu]'
 pinn -h
 ```
 
@@ -13,27 +19,39 @@ Extra dependencies can be specified:
 - `[gpu]` or `[cpu]`: cpu or gpu version of TensorFlow
 - `[dev]`: development requirements for testing
 - `[doc]`: documentation requirements
-- `[extra]`: extra requirements (Jupyter, pymatgen, etc) 
+- `[extra]`: extra requirements (Jupyter, pymatgen, etc)
 
+**using conda**
 
-**using container** 
+```bash
+conda env create -f environment.yml
+conda activate pinn
+pip install -e .
+```
 
-PiNN provides two built docker images, which can be converted to singularity
-images without much effort:
+**using container**
+
+PiNN provides two published docker images, which can be converted to
+Singularity/Apptainer images without much effort:
 
 ```bash
 singularity build pinn.sif docker://tecatuu/pinn:master-gpu
 ./pinn.sif -h
 ```
 
-- `:master-cpu` is much smaller, it comes without GPU support
-- `:master-gpu` is the version with GPU support
+- `:master-cpu` — `tensorflow/tensorflow:2.15.0`, no GPU
+- `:master-gpu` — NGC `nvcr.io/nvidia/tensorflow:24.03-tf2-py3` (TF 2.15 + CUDA 12.4; x86_64 and aarch64/GH200)
 
-Extra dependencies like `Jupyter` are included in the image, for a quick 
-development environment:
+Both images run the `pinn` CLI. Jupyter is not bundled; install it locally if
+you want a notebook environment. Runtime dependencies come from `setup.py`.
+To build the images yourself:
 
 ```bash
-singularity run pinn.sif jupyter notebook
+docker build -t pinn:cpu .
+docker build -f Dockerfile.gpu -t pinn:gpu .
+# clusters without Docker:
+apptainer build /path/on/allowed/fs/pinn-cpu.sif Singularity
+apptainer build /path/on/allowed/fs/pinn-gpu.sif Singularity.gpu
 ```
 
 ## Configuration

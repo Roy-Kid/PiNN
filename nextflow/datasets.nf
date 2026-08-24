@@ -119,20 +119,20 @@ process gen_rmd17_single {
   #!/usr/bin/env python
   
   import numpy as np
-  import requests, zipfile, io, tarfile
+  import requests, io
   from pinn.io import load_numpy
   from pinn.io import write_tfrecord
-  import os
-  
-  rmd17_url = "https://figshare.com/ndownloader/articles/12672038/versions/3"
-  zip_bytes = requests.get(rmd17_url, allow_redirects=True).content
-  zip_bytes_io = io.BytesIO(zip_bytes)
-  zip_bytes_io.seek(0)
-  zip_fobj = zipfile.ZipFile(zip_bytes_io)
-  tar_path = zip_fobj.extract(zip_fobj.infolist()[0])
-  tar_fobj = tarfile.open(tar_path)
-  npz_obj = tar_fobj.extractfile('rmd17/npz_data/rmd17_${rmd17_tag}.npz')
-  tag_npz = np.load(npz_obj)
+
+  # figshare's article-archive endpoint returns HTTP 202 (assembles the zip
+  # asynchronously and never serves it here) and rejects the default requests
+  # user-agent. Resolve the per-molecule npz direct-download URL via the figshare
+  # API (with a browser UA) and fetch just that file instead of the 1 GB tarball.
+  hdr = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+  sess = requests.Session(); sess.headers.update(hdr)
+  api = "https://api.figshare.com/v2/articles/12672038/files?page_size=100"
+  url_map = {f['name']: f['download_url'] for f in sess.get(api, timeout=120).json()}
+  npz_bytes = sess.get(url_map['rmd17_${rmd17_tag}.npz'], allow_redirects=True, timeout=600).content
+  tag_npz = np.load(io.BytesIO(npz_bytes))
   tag_size = tag_npz['coords'].shape[0]
   tag_ds = load_numpy({
       'elems': np.repeat(tag_npz['nuclear_charges'][None,:], tag_size, axis=0),
@@ -141,9 +141,6 @@ process gen_rmd17_single {
       'f_data': tag_npz['forces']
   })
   write_tfrecord(f'rmd17-${rmd17_tag}.yml', tag_ds)
-  tar_fobj.close()
-  zip_fobj.close()
-  os.remove(tar_path)
   """
 }
 
@@ -240,7 +237,7 @@ process gen_mp2021 {
 """
 #!/usr/bin/env python
 
-import requests, zipfile, io, json
+import requests, io, json
 import pickle
 import numpy as np
 from pinn.io.base import list_loader
@@ -248,19 +245,15 @@ from pinn.io import write_tfrecord
 from ase.data import atomic_numbers
 from ase.cell import Cell
 
-mpf_url = "https://figshare.com/ndownloader/articles/19470599/versions/3"
-mpf_bytes = requests.get(mpf_url, allow_redirects=True).content
-mpf_fobj = io.BytesIO(mpf_bytes)
-mpf_fobj.seek(0)
-
-mpf_zip = zipfile.ZipFile(mpf_fobj)
-part1 = mpf_zip.extract('block_0.p')
-part2 = mpf_zip.extract('block_1.p')
-
-with open(part1, 'rb') as f:
-    data1 = pickle.load(f)
-with open(part2, 'rb') as f:
-    data2 = pickle.load(f)
+# figshare's article-zip endpoint returns HTTP 202 (assembles asynchronously,
+# never served here) and rejects the default requests UA; fetch the two pickle
+# blocks directly via the figshare API with a browser UA.
+hdr = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+sess = requests.Session(); sess.headers.update(hdr)
+api = "https://api.figshare.com/v2/articles/19470599/files?page_size=100"
+url_map = {f['name']: f['download_url'] for f in sess.get(api, timeout=120).json()}
+data1 = pickle.loads(sess.get(url_map['block_0.p'], allow_redirects=True, timeout=600).content)
+data2 = pickle.loads(sess.get(url_map['block_1.p'], allow_redirects=True, timeout=600).content)
 data = {**data1, **data2}
 
 flatten_data = []

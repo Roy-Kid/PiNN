@@ -31,17 +31,18 @@ class PiNN_calc(Calculator):
 
     def _generator(self):
         while True:
-            if self._atoms_to_calc.pbc.any():
+            atoms = self._atoms_to_calc
+            if atoms.pbc.any():
                 data = {
-                    'cell': self._atoms_to_calc.cell[np.newaxis, :, :],
-                    'coord': self._atoms_to_calc.positions,
-                    'ind_1': np.zeros([len(self._atoms_to_calc), 1]),
-                    'elems': self._atoms_to_calc.numbers}
+                    'cell': np.asarray(atoms.cell)[np.newaxis, :, :],
+                    'coord': atoms.positions,
+                    'ind_1': np.zeros([len(atoms), 1]),
+                    'elems': atoms.numbers}
             else:
                 data = {
-                    'coord': self._atoms_to_calc.positions,
-                    'ind_1': np.zeros([len(self._atoms_to_calc), 1]),
-                    'elems': self._atoms_to_calc.numbers}
+                    'coord': atoms.positions,
+                    'ind_1': np.zeros([len(atoms), 1]),
+                    'elems': atoms.numbers}
             yield data
 
     def get_predictor(self, dtype=tf.float32):
@@ -61,9 +62,20 @@ class PiNN_calc(Calculator):
         else:
             self.pbc = False
 
+        def _input_fn():
+            ds = tf.data.Dataset.from_generator(
+                self._generator, dtypes, shapes)
+            # Pull exactly one element per predict step. TF>=2.15 otherwise
+            # autotunes a prefetch that reads the generator ahead of time, so a
+            # next() would return the prediction for the PREVIOUS atoms (the
+            # calculator mutates self._atoms_to_calc in place between calls).
+            options = tf.data.Options()
+            options.autotune.enabled = False
+            options.experimental_optimization.apply_default_optimizations = False
+            return ds.with_options(options)
+
         self.predictor = self.model.predict(
-            input_fn=lambda: tf.data.Dataset.from_generator(
-                self._generator, dtypes, shapes),
+            input_fn=_input_fn,
             predict_keys=properties,
             checkpoint_path=self.ckpt_path)
         return self.predictor

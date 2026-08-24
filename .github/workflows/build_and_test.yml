@@ -1,21 +1,29 @@
 name: Build and Test
 on:
   push:
+  pull_request:
     branches:
       - master
-    tags:
-      - v*
-  pull_request: 
-    branches: 
-      - master
+  workflow_dispatch:
+
+# Image publish + docs deploy are a Teoroo-CMC/PiNN privilege, and only on
+# master / version tags. Forks, PRs, and feature-branch pushes still *build*
+# the CPU image (to catch a broken Dockerfile) but never log in or push.
+# GPU images are not built here — NGC bases are too large for GHA, and there
+# is no GPU runner. Build Dockerfile.gpu / Singularity.gpu locally or on the
+# cluster. The second Docker Hub org job is CPU publish-only.
+
 jobs:
   pytest:
     continue-on-error: ${{ matrix.experimental }}
     name: "PYtest (Py${{ matrix.py-version }}-TF${{ matrix.tf-version }}${{ matrix.experimental && '-exp' || '' }})"
     strategy:
       matrix:
-        py-version: ["3.8", "3.9", "3.10"]
-        tf-version: ["2.8", "2.9"]
+        # TF 2.15 is the supported backend: the last release shipping
+        # tf.estimator + the legacy Keras optimizers (both removed in 2.16) and
+        # the window that supports recent (Hopper / sm_90) GPUs.
+        py-version: ["3.9", "3.10", "3.11"]
+        tf-version: ["2.15"]
         experimental: [false]
     runs-on: ubuntu-latest
     steps:
@@ -36,7 +44,7 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -r requirements-doc.txt
-          pip install tensorflow==${{ matrix.tf-version }} 'protobuf<3.20' 'numpy<2'
+          pip install 'tensorflow==${{ matrix.tf-version }}.*' 'numpy<2'
           pip install .
       - name: Test with pytest
         run: pytest --forked tests/
@@ -44,23 +52,27 @@ jobs:
     name: Build docker (cpu)
     needs: pytest
     runs-on: ubuntu-latest
+    env:
+      PUSH_IMAGE: ${{ github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
       - name: Get Tag
         run: echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_ENV
       - name: Login to Docker Hub
+        if: env.PUSH_IMAGE == 'true'
         uses: docker/login-action@v1
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
-      - name: Push to Docker Hub
+      - name: Build docker image
         uses: docker/build-push-action@v2
         with:
-          push: true
-          tags: ${{ secrets.DOCKERHUB_REPO }}:${{ env.TAG }}-cpu
+          push: ${{ env.PUSH_IMAGE == 'true' }}
+          tags: ${{ env.PUSH_IMAGE == 'true' && format('{0}:{1}-cpu', secrets.DOCKERHUB_REPO, env.TAG) || format('pinn:{0}-cpu', env.TAG) }}
   build-cpu-to-new-org:
     name: Build docker (cpu) - new
+    if: github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     needs: pytest
     runs-on: ubuntu-latest
     steps:
@@ -78,48 +90,9 @@ jobs:
         with:
           push: true
           tags: ${{ vars.NEW_DOCKERHUB_REPO }}:${{ env.TAG }}-cpu
-  build-gpu:
-    name: Build docker (gpu)
-    needs: pytest
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v5
-      - name: Get Tag
-        run: echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_ENV
-      - name: Login to Docker Hub
-        uses: docker/login-action@v1
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
-      - name: Push to Docker Hub
-        uses: docker/build-push-action@v2
-        with:
-          push: true
-          file: Dockerfile.gpu
-          tags: ${{ secrets.DOCKERHUB_REPO }}:${{ env.TAG }}-gpu
-  build-gpu-to-new-org:
-    name: Build docker (gpu) - new
-    needs: pytest
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v5
-      - name: Get Tag
-        run: echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_ENV
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.NEW_DOCKERHUB_USERNAME }}
-          password: ${{ secrets.NEW_DOCKERHUB_PASSWORD }}
-      - name: Push to Docker Hub
-        uses: docker/build-push-action@v2
-        with:
-          push: true
-          file: Dockerfile.gpu
-          tags: ${{ vars.NEW_DOCKERHUB_REPO }}:${{ env.TAG }}-gpu
   deploy-docs:
     name: Deploy docs
+    if: github.repository == 'Teoroo-CMC/PiNN' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))
     needs: pytest
     runs-on: ubuntu-latest
     steps:
@@ -135,7 +108,7 @@ jobs:
           cache-dependency-path: "requirements*.txt"
       - name: Install PiNN
         run: |
-          pip install tensorflow==2.8 'protobuf<3.20'
+          pip install 'tensorflow==2.15.*' 'numpy<2'
           pip install -r requirements-dev.txt
           pip install -r requirements-doc.txt
           pip install .

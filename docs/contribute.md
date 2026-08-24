@@ -2,13 +2,15 @@
 
 ## Developer Setup
 
-Install the library with the `[dev,doc]` options to install the test and
-documentation building suite.
+Python 3.9–3.11 and TensorFlow 2.15 are required. Install with the
+`[dev,doc]` extras (and `[cpu]` or `[gpu]` for TensorFlow):
 
-```Python
-pip install git+https://github.com/Teoroo-CMC/PiNN.git[dev,doc]
-pytest # to run all the tests
-mkdocs serve # build a live documentation
+```sh
+git clone https://github.com/Teoroo-CMC/PiNN.git
+cd PiNN
+pip install -e '.[cpu,dev,doc]'   # or '.[gpu,dev,doc]'
+pytest                            # run the tests
+mkdocs serve                      # live documentation
 ```
 
 ## Pull Request Checklist
@@ -18,9 +20,10 @@ request (PR), which will be reviewed by at least one member of the PiNN team.
 Track your development with a fork and start contributing by opening a PR. PR
 can be used to discussed new features without implementation. 
 
-The default GitHub actions runs the tests automatically, and builds a versioned
-documentation for each fork. Below is a checklist before merging commits to the
-master branch:
+GitHub Actions runs the tests on every push and pull request. Documentation is
+deployed from `Teoroo-CMC/PiNN` on `master` and version tags; forks still *build*
+the docs and the CPU image to catch breakage. Below is a checklist before
+merging commits to the master branch:
 
 ### Code Quality
 

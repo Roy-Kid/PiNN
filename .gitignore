@@ -18,3 +18,14 @@ _build/
 /models/
 *.log
 *.out
+.venv
+.venv-*/
+.conda-*/
+.ngc-deps/
+.ngc-userbase/
+build/
+# production run artifacts + scratch params (large data / local-only)
+/prod/
+/full.json
+# local working notes / specs
+/.claude/

@@ -160,7 +160,9 @@ def TuneTrainable(train_fn):
     """
     import os
     from ray.tune import Trainable
-    from tensorflow.train import CheckpointSaverListener
+    # TF2: CheckpointSaverListener lives under tf.estimator (not tf.train), and
+    # tf.logging was removed in favour of tf.compat.v1.logging / tf.get_logger().
+    from tensorflow.estimator import CheckpointSaverListener
 
     class _tuneStoper(CheckpointSaverListener):
         def after_save(self, session, global_step_value):
@@ -168,7 +170,7 @@ def TuneTrainable(train_fn):
 
     class TuneTrainable(Trainable):
         def _setup(self, config):
-            tf.logging.set_verbosity(tf.logging.ERROR)
+            tf.get_logger().setLevel('ERROR')
             self.config = config
             model, train_spec, eval_spec, reporter = train_fn(config)
             self.model = model

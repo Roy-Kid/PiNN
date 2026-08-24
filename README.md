@@ -11,10 +11,11 @@ This project was initiated by [Yunqi Shao][yqshao]. The code is currently mainta
 
 ## Requirements
 
-- Python >= 3.7
-- [ASE](https://wiki.fysik.dtu.dk/ase/) >= 3.19
-- [PyYAML](https://pyyaml.org/) > 3.01
-- [TensorFlow](https://www.tensorflow.org/install) >= 2.4<sup>[3](#fn3)</sup> and <=2.9<sup>[4](#fn4)</sup>
+- Python >= 3.9 and < 3.12
+- [ASE](https://wiki.fysik.dtu.dk/ase/) >= 3.25
+- [PyYAML](https://pyyaml.org/) ~= 6.0.1
+- [TensorFlow](https://www.tensorflow.org/install) >= 2.15 and < 2.16<sup>[3](#fn3),[4](#fn4)</sup>
+- NumPy < 2
 
 ## Installation
 
@@ -36,13 +37,22 @@ pip install -e .
 ```
 
 2) Alternatively, you can use the [docker
-image](https://hub.docker.com/r/tecatuu/pinn/tags) to contain the environment. If you prefer
-singularity, you need build a singularity image from the docker image:
+image](https://hub.docker.com/r/tecatuu/pinn/tags). The CPU image is based on
+`tensorflow/tensorflow:2.15.0`; the GPU image on NVIDIA NGC
+`nvcr.io/nvidia/tensorflow:24.03-tf2-py3` (x86_64 and aarch64/GH200). Both
+images expose the `pinn` CLI (Jupyter is no longer bundled).
 
 ``` sh
-singularity build pinn.sif docker://tecatuu/pinn:master-gpu (or master-cpu)
-singularity exec pinn.sif jupyter notebook # this starts a jupyter notebook server
-./pinn.sif --help # this invokes the pinn CLI
+# published tags (built on Teoroo-CMC/PiNN master / version tags)
+singularity build pinn.sif docker://tecatuu/pinn:master-gpu   # or master-cpu
+./pinn.sif --help
+
+# or build from this repo (runtime deps come from setup.py)
+docker build -t pinn:cpu .
+docker build -f Dockerfile.gpu -t pinn:gpu .
+# clusters without Docker:
+apptainer build /path/on/allowed/fs/pinn-cpu.sif Singularity
+apptainer build /path/on/allowed/fs/pinn-gpu.sif Singularity.gpu
 ```
 
 ## Documentation
@@ -102,9 +112,11 @@ C. PiNN: Equivariant Neural Network Suite for Modelling Electrochemical Systems.
 C. PiNN: A Python Library for Building Atomic Neural Networks of Molecules and
 Materials. J. Chem. Inf. Model., 2020, 60: 1184. 
 
-<a name="fn3">[3]</a> TensorFlow is not installed automatically by default.
-Since TF 2.0 the GPU support is included in the stable release, ``pip install
-tensorflow>=2.4`` should be suitable for most user. 
+<a name="fn3">[3]</a> TensorFlow is not installed by ``pip install pinn`` alone.
+Use the extras: ``pip install -e '.[cpu]'`` or ``pip install -e '.[gpu]'``
+(x86_64 CUDA wheel). There is no aarch64 GPU wheel on PyPI; GH200 / Hopper
+nodes should use ``Dockerfile.gpu`` / ``Singularity.gpu`` (NGC TF 2.15).
 
-<a name="fn4">[4]</a> Currently the code is not compatible with TF 2.10 and above,
-see [Issue #7](https://github.com/Teoroo-CMC/PiNN/issues/7) for details or updates.
+<a name="fn4">[4]</a> TF 2.15 is the last release that still ships
+``tf.estimator`` and the legacy Keras optimizers (removed in 2.16), which
+PiNN's training loop depends on. See the [migration notes](docs/migration.md).
