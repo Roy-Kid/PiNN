@@ -18,11 +18,11 @@ jobs:
         py-version: ["3.9", "3.11"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0 # see https://github.com/jimporter/mike/issues/28
       - name: Set up Python ${{ matrix.py-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.py-version }}
           cache: "pip"
