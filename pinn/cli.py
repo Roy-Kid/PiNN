@@ -93,7 +93,7 @@ def train(params, model_dir, train_ds, eval_ds, batch, cache, preprocess,
     from pinn import get_model, get_network
     from pinn.utils import init_params
     from pinn.io import load_tfrecord, sparse_batch
-    from pinn.models.base import apply_precision
+    from pinn.models.base import apply_precision, precision_from_params
     index_warning = 'Converting sparse IndexedSlices'
     warnings.filterwarnings('ignore', index_warning)
     tf.get_logger().setLevel('ERROR')
@@ -102,7 +102,7 @@ def train(params, model_dir, train_ds, eval_ds, batch, cache, preprocess,
         params = yaml.load(f, Loader=yaml.Loader)
     if model_dir is not None:
         params['model_dir'] = model_dir
-    apply_precision(params.get('precision', 'fp32'))
+    apply_precision(precision_from_params(params))
 
     if init:
         ds = load_tfrecord(train_ds)

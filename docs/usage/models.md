@@ -29,13 +29,15 @@ optimizer:
   class_name: EKF
   config:
     learning_rate: 0.03
-precision: fp32
+numeric:
+  precision: fp32
 ```
 
-`precision` is optional and defaults to `fp32`. Allowed values are `fp32`,
-`fp16`, and `bf16` (aliases `float32` / `float16` / `bfloat16`). Reduced
-precision uses Keras mixed precision: variables stay float32, compute runs
-in float16 or bfloat16. `fp16` applies a static loss scale of 128.
+`numeric` holds numerical runtime options. `precision` is optional and
+defaults to `fp32`. Allowed values are `fp32`, `fp16`, and `bf16` (aliases
+`float32` / `float16` / `bfloat16`). Reduced precision uses Keras mixed
+precision: variables stay float32, compute runs in float16 or bfloat16.
+`fp16` applies a static loss scale of 128.
 
 Among those, the `optimizer` section follows the format of a Keras optimizer.
 The `model` and `network` sections specify the name and parameters of initialize

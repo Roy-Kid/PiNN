@@ -2,8 +2,8 @@
 
 Train a PiNN model given a parameter file.
 
-The parameter YAML may include a top-level `precision` key (`fp32`, `fp16`,
-or `bf16`). It defaults to `fp32` when omitted. See
+The parameter YAML may include `numeric.precision` (`fp32`, `fp16`, or
+`bf16`). It defaults to `fp32` when omitted. See
 [Models](../models.md#configuration).
 
 ## Usage

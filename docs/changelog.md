@@ -16,9 +16,9 @@ documented in this change log.
 ### v2.1.1
 
 - Training:
-    * Optional YAML `precision` (`fp32` / `fp16` / `bf16`). Default remains
-      **fp32**. `fp16`/`bf16` use Keras mixed precision (float32 variables,
-      reduced-precision compute).
+    * Optional YAML `numeric.precision` (`fp32` / `fp16` / `bf16`). Default
+      remains **fp32**. `fp16`/`bf16` use Keras mixed precision (float32
+      variables, reduced-precision compute).
 
 ### v2.1.0
 

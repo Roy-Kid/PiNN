@@ -8,7 +8,13 @@ import tensorflow as tf
 import yaml
 from tensorflow.python.lib.io.file_io import FileIO
 
-from pinn.models.base import apply_precision
+from pinn.models.base import apply_precision, precision_from_params
+
+
+def test_precision_from_params_reads_numeric_block():
+    assert precision_from_params({}) == 'fp32'
+    assert precision_from_params({'numeric': None}) == 'fp32'
+    assert precision_from_params({'numeric': {'precision': 'bf16'}}) == 'bf16'
 
 
 @pytest.mark.forked
@@ -61,7 +67,7 @@ def test_default_params_record_fp32():
     pinn.get_model(params)
     with FileIO(os.path.join(testpath, 'params.yml'), 'r') as f:
         saved = yaml.load(f, Loader=yaml.Loader)
-    assert saved.get('precision', 'fp32') == 'fp32'
+    assert saved.get('numeric', {}).get('precision', 'fp32') == 'fp32'
     apply_precision('fp32')
 
 
@@ -80,7 +86,7 @@ def test_fp16_precision_trains():
     }
     params = {
         'model_dir': testpath,
-        'precision': 'fp16',
+        'numeric': {'precision': 'fp16'},
         'network': {
             'name': 'PiNet',
             'params': {
@@ -108,5 +114,5 @@ def test_fp16_precision_trains():
     tf.estimator.train_and_evaluate(model, train_spec, eval_spec)
     with FileIO(os.path.join(testpath, 'params.yml'), 'r') as f:
         saved = yaml.load(f, Loader=yaml.Loader)
-    assert saved['precision'] == 'fp16'
+    assert saved['numeric']['precision'] == 'fp16'
     apply_precision('fp32')

@@ -16,6 +16,14 @@ _PRECISION_POLICIES = {
 _FP16_LOSS_SCALE = 128.0
 
 
+def precision_from_params(params):
+    """Read ``numeric.precision`` from a PiNN parameter dict."""
+    numeric = params.get('numeric')
+    if not isinstance(numeric, dict):
+        return 'fp32'
+    return numeric.get('precision', 'fp32')
+
+
 def apply_precision(precision='fp32'):
     """Set the Keras mixed-precision policy used during training.
 
@@ -41,15 +49,19 @@ def apply_precision(precision='fp32'):
 def export_model(model_fn):
     # default parameters for all models
     from pinn.optimizers import default_adam
-    default_params = {'optimizer': default_adam, 'precision': 'fp32'}
+    default_numeric = {'precision': 'fp32'}
+    default_params = {'optimizer': default_adam, 'numeric': default_numeric}
     def pinn_model(params, **kwargs):
         model_dir = params['model_dir']
         params_tmp = default_params.copy()
         params_tmp.update(params)
+        numeric = dict(default_numeric)
+        numeric.update(params.get('numeric') or {})
+        params_tmp['numeric'] = numeric
         params = params_tmp
-        apply_precision(params.get('precision', 'fp32'))
+        apply_precision(precision_from_params(params))
         def model_fn_with_precision(features, labels, mode, params):
-            apply_precision(params.get('precision', 'fp32'))
+            apply_precision(precision_from_params(params))
             return model_fn(features, labels, mode, params)
         model = tf.estimator.Estimator(
             model_fn=model_fn_with_precision, params=params,
