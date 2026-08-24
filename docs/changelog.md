@@ -16,9 +16,10 @@ documented in this change log.
 ### v2.1.1
 
 - Training:
-    * Optional YAML `numeric.precision` (`fp32` / `fp16` / `bf16`). Default
-      remains **fp32**. `fp16`/`bf16` use Keras mixed precision (float32
-      variables, reduced-precision compute).
+    * YAML `settings.train_dtype` (`float32` / `float64`, default
+      **float32**) sets the training float type. The ASE calculator takes
+      MACE-style `default_dtype` as a constructor argument only; empty
+      follows `train_dtype`.
 
 ### v2.1.0
 

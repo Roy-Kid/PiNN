@@ -82,8 +82,8 @@ optimizer:
   class_name: EKF
   config:
     learning_rate: 0.03
-numeric:
-  precision: fp32   # optional; fp16 / bf16 for mixed precision
+settings:
+  train_dtype: float32   # float32 | float64; training only
 ```
 
 ## Using the CLI

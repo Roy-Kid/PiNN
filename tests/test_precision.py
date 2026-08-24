@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Training-precision YAML parameter"""
+"""settings.train_dtype (YAML) and calculator default_dtype (constructor)."""
 import os
 import tempfile
 
@@ -8,44 +8,69 @@ import tensorflow as tf
 import yaml
 from tensorflow.python.lib.io.file_io import FileIO
 
-from pinn.models.base import apply_precision, precision_from_params
+from pinn.calculator import PiNN_calc
+from pinn.models.base import (
+    apply_train_dtype, tf_dtype_from_name, train_dtype_from_params,
+)
 
 
-def test_precision_from_params_reads_numeric_block():
-    assert precision_from_params({}) == 'fp32'
-    assert precision_from_params({'numeric': None}) == 'fp32'
-    assert precision_from_params({'numeric': {'precision': 'bf16'}}) == 'bf16'
+def test_tf_dtype_from_name():
+    assert tf_dtype_from_name('float32') == tf.float32
+    assert tf_dtype_from_name('fp64') == tf.float64
+    assert tf_dtype_from_name('') == tf.float32
+    with pytest.raises(ValueError, match='Unknown dtype'):
+        tf_dtype_from_name('float16')
+
+
+def test_train_dtype_from_params():
+    assert train_dtype_from_params({}) == 'float32'
+    assert train_dtype_from_params({'settings': None}) == 'float32'
+    assert train_dtype_from_params(
+        {'settings': {'train_dtype': 'float64'}}) == 'float64'
+
+
+def test_calc_default_dtype_is_constructor_only():
+    class _Model:
+        params = {'settings': {'train_dtype': 'float64'}}
+
+    calc = PiNN_calc(model=_Model(), default_dtype='')
+    assert calc._dtype_name() == 'float64'
+    assert calc._tf_dtype() == tf.float64
+    calc_override = PiNN_calc(model=_Model(), default_dtype='float32')
+    assert calc_override._tf_dtype() == tf.float32
+    calc_plain = PiNN_calc(model=type('M', (), {})())
+    assert calc_plain._tf_dtype() == tf.float32
 
 
 @pytest.mark.forked
-def test_unknown_precision_raises():
-    with pytest.raises(ValueError, match='Unknown precision'):
-        apply_precision('fp8')
+def test_unknown_train_dtype_raises():
+    with pytest.raises(ValueError, match='Unknown dtype'):
+        apply_train_dtype('fp16')
 
 
 @pytest.mark.forked
-def test_fp32_is_the_default_policy():
-    apply_precision('fp32')
-    assert tf.keras.mixed_precision.global_policy().name == 'float32'
-    apply_precision(None)
-    assert tf.keras.mixed_precision.global_policy().name == 'float32'
+def test_float32_is_the_default():
+    apply_train_dtype('float32')
+    assert tf.keras.backend.floatx() == 'float32'
+    apply_train_dtype(None)
+    assert tf.keras.backend.floatx() == 'float32'
 
 
-@pytest.mark.parametrize('name,policy', [
-    ('fp32', 'float32'),
+@pytest.mark.parametrize('name,keras', [
     ('float32', 'float32'),
-    ('fp16', 'mixed_float16'),
-    ('bf16', 'mixed_bfloat16'),
+    ('fp32', 'float32'),
+    ('float64', 'float64'),
+    ('fp64', 'float64'),
 ])
 @pytest.mark.forked
-def test_apply_precision_sets_policy(name, policy):
-    apply_precision(name)
-    assert tf.keras.mixed_precision.global_policy().name == policy
-    apply_precision('fp32')
+def test_apply_train_dtype(name, keras):
+    apply_train_dtype(name)
+    assert tf.keras.backend.floatx() == keras
+    apply_train_dtype('float32')
 
 
 @pytest.mark.forked
-def test_default_params_record_fp32():
+def test_default_params_record_train_dtype():
     import pinn
     testpath = tempfile.mkdtemp()
     params = {
@@ -67,12 +92,13 @@ def test_default_params_record_fp32():
     pinn.get_model(params)
     with FileIO(os.path.join(testpath, 'params.yml'), 'r') as f:
         saved = yaml.load(f, Loader=yaml.Loader)
-    assert saved.get('numeric', {}).get('precision', 'fp32') == 'fp32'
-    apply_precision('fp32')
+    assert saved.get('settings', {}).get('train_dtype', 'float32') == 'float32'
+    assert 'default_dtype' not in saved.get('settings', {})
+    apply_train_dtype('float32')
 
 
 @pytest.mark.forked
-def test_fp16_precision_trains():
+def test_float64_trains():
     import numpy as np
     import pinn
     from pinn.io import load_numpy, sparse_batch
@@ -80,13 +106,13 @@ def test_fp16_precision_trains():
     testpath = tempfile.mkdtemp()
     n = 8
     data = {
-        'coord': np.random.randn(n, 3, 3).astype(np.float32),
+        'coord': np.random.randn(n, 3, 3).astype(np.float64),
         'elems': np.ones((n, 3), dtype=np.int32),
-        'e_data': np.random.randn(n).astype(np.float32),
+        'e_data': np.random.randn(n).astype(np.float64),
     }
     params = {
         'model_dir': testpath,
-        'numeric': {'precision': 'fp16'},
+        'settings': {'train_dtype': 'float64'},
         'network': {
             'name': 'PiNet',
             'params': {
@@ -114,5 +140,5 @@ def test_fp16_precision_trains():
     tf.estimator.train_and_evaluate(model, train_spec, eval_spec)
     with FileIO(os.path.join(testpath, 'params.yml'), 'r') as f:
         saved = yaml.load(f, Loader=yaml.Loader)
-    assert saved['numeric']['precision'] == 'fp16'
-    apply_precision('fp32')
+    assert saved['settings']['train_dtype'] == 'float64'
+    apply_train_dtype('float32')

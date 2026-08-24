@@ -24,8 +24,8 @@ network:
     out_nodes: [64]
     weighted: False
     rank: 3
-numeric:
-  precision: fp32
+settings:
+  train_dtype: float32
 optimizer:
   class_name: Adam
   config:

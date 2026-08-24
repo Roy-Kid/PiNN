@@ -56,11 +56,27 @@ descriptions.
 A calculator can be created from a model as simple as:
 
 ```Python
-from pinn.get_calc
+from pinn import get_calc
 calc = get_calc('/path/to/model/')
+calc = get_calc('/path/to/model/', default_dtype='float64')
 calc.calculate(atoms)
 calc.get_forces()
 ```
+
+**ASE MD is always float64** (positions, cell, momenta, the integrator).
+
+`default_dtype` is a constructor argument only, same idea as MACE
+`model.float()` / `model.double()`: if it differs from
+`settings.train_dtype`, checkpoint weights are `tf.cast` **once at
+load**, then the whole TF graph (weights, matmuls, bias-adds, neighbor
+list) runs in that dtype. ASE → TF is the only other conversion
+(float64 positions into the predictor tensor).
+
+Train float64 + `default_dtype='float32'` → a float32 **model**, not
+float32 inputs feeding a float64 net. Train float32 +
+`default_dtype='float64'` → weights cast up for this calculator only.
+
+Full path: [Models — inference](models.md#inference-and-the-ase-calculator).
 
 ### Units
 

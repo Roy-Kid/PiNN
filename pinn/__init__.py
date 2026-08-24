@@ -10,7 +10,9 @@ def get_calc(model_spec, **kwargs):
     """Get a calculator from a trained model.
 
     The positional argument will be passed to `pinn.get_model`, keyword
-    arguments will be passed to the calculator.
+    arguments will be passed to the calculator. ``default_dtype`` is a
+    calculator argument (not YAML): empty string uses
+    ``settings.train_dtype``, else float32.
     """
     import tensorflow as tf
     from pinn import get_model

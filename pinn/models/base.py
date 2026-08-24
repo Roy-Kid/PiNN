@@ -1,70 +1,117 @@
 # -*- coding: utf-8 -*-
 """Basic functions for PiNN models"""
+import threading
 import tensorflow as tf
 from pinn.utils import pi_named
 
-# Public YAML names -> Keras mixed-precision policy.
-# fp16/bf16 keep float32 variables and compute in reduced precision.
-_PRECISION_POLICIES = {
-    'fp32': 'float32',
+# float32 / float64 names (fp32 / fp64 accepted). YAML uses train_dtype only.
+
+_DTYPE_NAMES = {
     'float32': 'float32',
-    'fp16': 'mixed_float16',
-    'float16': 'mixed_float16',
-    'bf16': 'mixed_bfloat16',
-    'bfloat16': 'mixed_bfloat16',
+    'fp32': 'float32',
+    'float64': 'float64',
+    'fp64': 'float64',
 }
-_FP16_LOSS_SCALE = 128.0
+_infer_dtype = threading.local()
 
 
-def precision_from_params(params):
-    """Read ``numeric.precision`` from a PiNN parameter dict."""
-    numeric = params.get('numeric')
-    if not isinstance(numeric, dict):
-        return 'fp32'
-    return numeric.get('precision', 'fp32')
+def tf_dtype_from_name(name='float32'):
+    """Map ``float32`` / ``float64`` (or ``fp32`` / ``fp64``) to a ``tf.DType``.
 
-
-def apply_precision(precision='fp32'):
-    """Set the Keras mixed-precision policy used during training.
-
-    Args:
-        precision (str): ``fp32`` (default), ``fp16``, or ``bf16``.
-            Aliases ``float32`` / ``float16`` / ``bfloat16`` are accepted.
-
-    Returns:
-        str: the Keras policy name that was applied.
+    Empty / ``None`` is float32.
     """
-    if precision is None:
-        precision = 'fp32'
-    key = str(precision).lower()
-    if key not in _PRECISION_POLICIES:
-        allowed = ', '.join(sorted(set(_PRECISION_POLICIES)))
+    if name is None or name == '':
+        return tf.float32
+    key = str(name).lower()
+    if key not in _DTYPE_NAMES:
+        allowed = ', '.join(sorted(set(_DTYPE_NAMES)))
         raise ValueError(
-            f'Unknown precision {precision!r}. Expected one of: {allowed}.')
-    policy = _PRECISION_POLICIES[key]
-    tf.keras.mixed_precision.set_global_policy(policy)
-    return policy
+            f'Unknown dtype {name!r}. Expected one of: {allowed}.')
+    return tf.as_dtype(_DTYPE_NAMES[key])
+
+
+def train_dtype_from_params(params):
+    """Read ``settings.train_dtype``; empty / missing means ``float32``."""
+    settings = params.get('settings') if isinstance(params, dict) else None
+    if not isinstance(settings, dict):
+        return 'float32'
+    name = settings.get('train_dtype') or ''
+    return 'float32' if name == '' else str(name)
+
+
+def apply_train_dtype(name='float32'):
+    """Set Keras floatx and dtype policy (all new float weights/ops)."""
+    dtype = tf_dtype_from_name(name)
+    tf.keras.backend.set_floatx(dtype.name)
+    tf.keras.mixed_precision.set_global_policy(dtype.name)
+    return dtype.name
+
+
+def set_infer_dtype(name):
+    """Calculator sets this before ``predict()`` (MACE ``default_dtype``)."""
+    _infer_dtype.name = name
+
+
+def _canonical_dtype_name(name):
+    return tf_dtype_from_name(name).name
+
+
+class _CastSaver(tf.compat.v1.train.Saver):
+    """Restore a checkpoint into variables of a (possibly different) dtype.
+
+    TensorFlow variables cannot change dtype in place, so this is the
+    equivalent of PyTorch ``model.float()`` / ``model.double()``: build
+    the graph at the target dtype, then ``tf.cast`` each weight once at
+    load. After that every op runs in the target dtype.
+    """
+
+    def __init__(self):
+        super().__init__(var_list=[], allow_empty=True)
+
+    def restore(self, sess, save_path):
+        import numpy as np
+        reader = tf.compat.v1.train.load_checkpoint(save_path)
+        keys = reader.get_variable_to_shape_map()
+        assigns = []
+        for var in tf.compat.v1.global_variables():
+            key = var.op.name
+            if key not in keys:
+                continue
+            raw = np.asarray(reader.get_tensor(key))
+            dst = var.dtype.base_dtype.as_numpy_dtype
+            assigns.append(var.assign(raw.astype(dst, copy=False)))
+        if assigns:
+            sess.run(assigns)
 
 
 def export_model(model_fn):
     # default parameters for all models
     from pinn.optimizers import default_adam
-    default_numeric = {'precision': 'fp32'}
-    default_params = {'optimizer': default_adam, 'numeric': default_numeric}
+    default_settings = {'train_dtype': 'float32'}
+    default_params = {'optimizer': default_adam, 'settings': default_settings}
     def pinn_model(params, **kwargs):
         model_dir = params['model_dir']
         params_tmp = default_params.copy()
         params_tmp.update(params)
-        numeric = dict(default_numeric)
-        numeric.update(params.get('numeric') or {})
-        params_tmp['numeric'] = numeric
+        settings = dict(default_settings)
+        settings.update(params.get('settings') or {})
+        params_tmp['settings'] = settings
         params = params_tmp
-        apply_precision(precision_from_params(params))
-        def model_fn_with_precision(features, labels, mode, params):
-            apply_precision(precision_from_params(params))
+        apply_train_dtype(train_dtype_from_params(params))
+        def model_fn_with_dtype(features, labels, mode, params):
+            train_dt = train_dtype_from_params(params)
+            if mode == tf.estimator.ModeKeys.PREDICT:
+                infer_dt = getattr(_infer_dtype, 'name', None) or train_dt
+                apply_train_dtype(infer_dt)
+                spec = model_fn(features, labels, mode, params)
+                if _canonical_dtype_name(infer_dt) != _canonical_dtype_name(train_dt):
+                    spec = spec._replace(
+                        scaffold=tf.compat.v1.train.Scaffold(saver=_CastSaver()))
+                return spec
+            apply_train_dtype(train_dt)
             return model_fn(features, labels, mode, params)
         model = tf.estimator.Estimator(
-            model_fn=model_fn_with_precision, params=params,
+            model_fn=model_fn_with_dtype, params=params,
             model_dir=model_dir, **kwargs)
         return model
     return pinn_model
@@ -141,9 +188,7 @@ def get_train_op(optimizer, metrics, tvars, separate_errors=False):
     optimizer = get(optimizer)
     optimizer.iterations = tf.compat.v1.train.get_or_create_global_step()
     nvars = np.sum([np.prod(var.shape) for var in tvars])
-    compute_dtype = tf.keras.mixed_precision.global_policy().compute_dtype
-    print(f'{nvars} trainable vaiables, training with {tvars[0].dtype.name} '
-          f'variables / {compute_dtype} compute.')
+    print(f'{nvars} trainable vaiables, training with {tvars[0].dtype.name} precision.')
 
     if not (isinstance(optimizer, EKF) or isinstance(optimizer, gEKF)):
         loss_list =  metrics.LOSS
@@ -152,13 +197,7 @@ def get_train_op(optimizer, metrics, tvars, separate_errors=False):
             loss = tf.stack(loss_list)[selection]
         else:
             loss = tf.reduce_sum(loss_list)
-        # mixed_float16 needs a loss scale so fp16 gradients do not underflow.
-        scale = _FP16_LOSS_SCALE if str(compute_dtype) == 'float16' else 1.0
-        if scale != 1.0:
-            loss = loss * scale
         grads = tf.gradients(loss, tvars)
-        if scale != 1.0:
-            grads = [g if g is None else g / scale for g in grads]
         return optimizer.apply_gradients(zip(grads, tvars))
     else:
         error_list =  metrics.ERROR
