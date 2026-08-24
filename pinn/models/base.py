@@ -3,17 +3,57 @@
 import tensorflow as tf
 from pinn.utils import pi_named
 
+# Public YAML names -> Keras mixed-precision policy.
+# fp16/bf16 keep float32 variables and compute in reduced precision.
+_PRECISION_POLICIES = {
+    'fp32': 'float32',
+    'float32': 'float32',
+    'fp16': 'mixed_float16',
+    'float16': 'mixed_float16',
+    'bf16': 'mixed_bfloat16',
+    'bfloat16': 'mixed_bfloat16',
+}
+_FP16_LOSS_SCALE = 128.0
+
+
+def apply_precision(precision='fp32'):
+    """Set the Keras mixed-precision policy used during training.
+
+    Args:
+        precision (str): ``fp32`` (default), ``fp16``, or ``bf16``.
+            Aliases ``float32`` / ``float16`` / ``bfloat16`` are accepted.
+
+    Returns:
+        str: the Keras policy name that was applied.
+    """
+    if precision is None:
+        precision = 'fp32'
+    key = str(precision).lower()
+    if key not in _PRECISION_POLICIES:
+        allowed = ', '.join(sorted(set(_PRECISION_POLICIES)))
+        raise ValueError(
+            f'Unknown precision {precision!r}. Expected one of: {allowed}.')
+    policy = _PRECISION_POLICIES[key]
+    tf.keras.mixed_precision.set_global_policy(policy)
+    return policy
+
+
 def export_model(model_fn):
     # default parameters for all models
     from pinn.optimizers import default_adam
-    default_params = {'optimizer': default_adam}
+    default_params = {'optimizer': default_adam, 'precision': 'fp32'}
     def pinn_model(params, **kwargs):
         model_dir = params['model_dir']
         params_tmp = default_params.copy()
         params_tmp.update(params)
         params = params_tmp
+        apply_precision(params.get('precision', 'fp32'))
+        def model_fn_with_precision(features, labels, mode, params):
+            apply_precision(params.get('precision', 'fp32'))
+            return model_fn(features, labels, mode, params)
         model = tf.estimator.Estimator(
-            model_fn=model_fn, params=params, model_dir=model_dir, **kwargs)
+            model_fn=model_fn_with_precision, params=params,
+            model_dir=model_dir, **kwargs)
         return model
     return pinn_model
 
@@ -89,7 +129,9 @@ def get_train_op(optimizer, metrics, tvars, separate_errors=False):
     optimizer = get(optimizer)
     optimizer.iterations = tf.compat.v1.train.get_or_create_global_step()
     nvars = np.sum([np.prod(var.shape) for var in tvars])
-    print(f'{nvars} trainable vaiables, training with {tvars[0].dtype.name} precision.')
+    compute_dtype = tf.keras.mixed_precision.global_policy().compute_dtype
+    print(f'{nvars} trainable vaiables, training with {tvars[0].dtype.name} '
+          f'variables / {compute_dtype} compute.')
 
     if not (isinstance(optimizer, EKF) or isinstance(optimizer, gEKF)):
         loss_list =  metrics.LOSS
@@ -98,7 +140,13 @@ def get_train_op(optimizer, metrics, tvars, separate_errors=False):
             loss = tf.stack(loss_list)[selection]
         else:
             loss = tf.reduce_sum(loss_list)
+        # mixed_float16 needs a loss scale so fp16 gradients do not underflow.
+        scale = _FP16_LOSS_SCALE if str(compute_dtype) == 'float16' else 1.0
+        if scale != 1.0:
+            loss = loss * scale
         grads = tf.gradients(loss, tvars)
+        if scale != 1.0:
+            grads = [g if g is None else g / scale for g in grads]
         return optimizer.apply_gradients(zip(grads, tvars))
     else:
         error_list =  metrics.ERROR

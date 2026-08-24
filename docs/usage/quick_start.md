@@ -82,6 +82,7 @@ optimizer:
   class_name: EKF
   config:
     learning_rate: 0.03
+precision: fp32   # optional; fp16 / bf16 for mixed precision
 ```
 
 ## Using the CLI
