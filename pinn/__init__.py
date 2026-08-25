@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-__version__ = '2.1.0'
+__version__ = '2.1.1'
 
 from pinn.networks import get as get_network
 from pinn.models import get as get_model
@@ -11,8 +11,7 @@ def get_calc(model_spec, **kwargs):
 
     The positional argument will be passed to `pinn.get_model`, keyword
     arguments will be passed to the calculator. ``default_dtype`` is a
-    calculator argument (not YAML): empty string uses
-    ``settings.train_dtype``, else float32.
+    calculator argument (not YAML): ``None`` follows ``settings.dtype``.
     """
     import tensorflow as tf
     from pinn import get_model

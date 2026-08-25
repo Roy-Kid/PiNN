@@ -5,14 +5,14 @@ import numpy as np
 import tensorflow as tf
 from ase.calculators.calculator import Calculator
 from pinn.models.base import (
-    set_infer_dtype, tf_dtype_from_name, train_dtype_from_params,
+    dtype_from_params, set_infer_dtype, tf_dtype_from_name,
 )
 
 
 class PiNN_calc(Calculator):
     def __init__(self, model=None, atoms=None, to_eV=1.0,
                  properties=['energy', 'forces', 'stress'],
-                 checkpoint_path=None, default_dtype=''):
+                 checkpoint_path=None, default_dtype=None):
         """PiNN interface with ASE as a calculator
 
         Args:
@@ -23,9 +23,9 @@ class PiNN_calc(Calculator):
                 the properties to calculate is fixed for each calculator,
                 to avoid resetting the predictor during get_* calls.
             default_dtype: MACE-style calculator arg (not a YAML key).
-                Empty follows ``settings.train_dtype``. If it differs from
-                the training dtype, checkpoint weights are cast once at
-                load (like ``model.float()`` / ``model.double()``) and the
+                ``None`` follows ``settings.dtype``. If it differs from
+                training, checkpoint weights are cast once at load
+                (like ``model.float()`` / ``model.double()``) and the
                 whole network runs in that dtype. ASE MD stays float64.
         """
         Calculator.__init__(self)
@@ -39,10 +39,10 @@ class PiNN_calc(Calculator):
         self.default_dtype = default_dtype
 
     def _dtype_name(self):
-        if self.default_dtype:
+        if self.default_dtype is not None:
             return self.default_dtype
         params = getattr(self.model, 'params', None)
-        return train_dtype_from_params(params)
+        return dtype_from_params(params)
 
     def _tf_dtype(self):
         return tf_dtype_from_name(self._dtype_name())

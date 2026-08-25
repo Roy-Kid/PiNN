@@ -2,12 +2,9 @@
 
 Train a PiNN model given a parameter file.
 
-The parameter YAML may include `settings.train_dtype` (`float32` or
-`float64`; default `float32`). That key is training-only: it sets Keras
-`floatx` / dtype policy, so new network weights, Keras ops, and numpy/ANI
-float inputs use that width. Integer indices stay `int32`. TFRecords keep
-the dtype they were converted with. The ASE calculator's `default_dtype` is
-**not** in the YAML; see [Models](../models.md#settings-train_dtype).
+The parameter YAML may include `settings.dtype` (`float32` or
+`float64`; default `float32`). See [Models](../models.md#settings-dtype).
+The ASE calculator's `default_dtype` is **not** in the YAML.
 
 ## Usage
 

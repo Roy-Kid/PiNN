@@ -4,42 +4,30 @@ import threading
 import tensorflow as tf
 from pinn.utils import pi_named
 
-# float32 / float64 names (fp32 / fp64 accepted). YAML uses train_dtype only.
-
-_DTYPE_NAMES = {
-    'float32': 'float32',
-    'fp32': 'float32',
-    'float64': 'float64',
-    'fp64': 'float64',
-}
 _infer_dtype = threading.local()
 
 
 def tf_dtype_from_name(name='float32'):
-    """Map ``float32`` / ``float64`` (or ``fp32`` / ``fp64``) to a ``tf.DType``.
+    """Map TF dtype name ``float32`` / ``float64`` to a ``tf.DType``.
 
-    Empty / ``None`` is float32.
+    ``None`` defaults to ``tf.float32``.
     """
-    if name is None or name == '':
-        return tf.float32
-    key = str(name).lower()
-    if key not in _DTYPE_NAMES:
-        allowed = ', '.join(sorted(set(_DTYPE_NAMES)))
+    if name is None:
+        name = 'float32'
+    dtype = tf.as_dtype(name)
+    if dtype not in (tf.float32, tf.float64):
         raise ValueError(
-            f'Unknown dtype {name!r}. Expected one of: {allowed}.')
-    return tf.as_dtype(_DTYPE_NAMES[key])
+            f'Unknown dtype {name!r}. Expected float32 or float64.')
+    return dtype
 
 
-def train_dtype_from_params(params):
-    """Read ``settings.train_dtype``; empty / missing means ``float32``."""
-    settings = params.get('settings') if isinstance(params, dict) else None
-    if not isinstance(settings, dict):
-        return 'float32'
-    name = settings.get('train_dtype') or ''
-    return 'float32' if name == '' else str(name)
+def dtype_from_params(params):
+    """Read ``settings.dtype``; missing means ``float32``."""
+    settings = (params or {}).get('settings') or {}
+    return settings.get('dtype', 'float32')
 
 
-def apply_train_dtype(name='float32'):
+def apply_dtype(name='float32'):
     """Set Keras floatx and dtype policy (all new float weights/ops)."""
     dtype = tf_dtype_from_name(name)
     tf.keras.backend.set_floatx(dtype.name)
@@ -50,10 +38,6 @@ def apply_train_dtype(name='float32'):
 def set_infer_dtype(name):
     """Calculator sets this before ``predict()`` (MACE ``default_dtype``)."""
     _infer_dtype.name = name
-
-
-def _canonical_dtype_name(name):
-    return tf_dtype_from_name(name).name
 
 
 class _CastSaver(tf.compat.v1.train.Saver):
@@ -87,7 +71,7 @@ class _CastSaver(tf.compat.v1.train.Saver):
 def export_model(model_fn):
     # default parameters for all models
     from pinn.optimizers import default_adam
-    default_settings = {'train_dtype': 'float32'}
+    default_settings = {'dtype': 'float32'}
     default_params = {'optimizer': default_adam, 'settings': default_settings}
     def pinn_model(params, **kwargs):
         model_dir = params['model_dir']
@@ -97,18 +81,18 @@ def export_model(model_fn):
         settings.update(params.get('settings') or {})
         params_tmp['settings'] = settings
         params = params_tmp
-        apply_train_dtype(train_dtype_from_params(params))
+        apply_dtype(dtype_from_params(params))
         def model_fn_with_dtype(features, labels, mode, params):
-            train_dt = train_dtype_from_params(params)
+            dt = dtype_from_params(params)
             if mode == tf.estimator.ModeKeys.PREDICT:
-                infer_dt = getattr(_infer_dtype, 'name', None) or train_dt
-                apply_train_dtype(infer_dt)
+                infer_dt = getattr(_infer_dtype, 'name', None) or dt
+                apply_dtype(infer_dt)
                 spec = model_fn(features, labels, mode, params)
-                if _canonical_dtype_name(infer_dt) != _canonical_dtype_name(train_dt):
+                if tf_dtype_from_name(infer_dt) != tf_dtype_from_name(dt):
                     spec = spec._replace(
                         scaffold=tf.compat.v1.train.Scaffold(saver=_CastSaver()))
                 return spec
-            apply_train_dtype(train_dt)
+            apply_dtype(dt)
             return model_fn(features, labels, mode, params)
         model = tf.estimator.Estimator(
             model_fn=model_fn_with_dtype, params=params,

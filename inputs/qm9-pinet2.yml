@@ -25,7 +25,7 @@ network:
     weighted: False
     rank: 3
 settings:
-  train_dtype: float32
+  dtype: float32
 optimizer:
   class_name: Adam
   config:

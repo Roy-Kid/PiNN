@@ -65,18 +65,11 @@ calc.get_forces()
 
 **ASE MD is always float64** (positions, cell, momenta, the integrator).
 
-`default_dtype` is a constructor argument only, same idea as MACE
-`model.float()` / `model.double()`: if it differs from
-`settings.train_dtype`, checkpoint weights are `tf.cast` **once at
-load**, then the whole TF graph (weights, matmuls, bias-adds, neighbor
-list) runs in that dtype. ASE → TF is the only other conversion
-(float64 positions into the predictor tensor).
-
-Train float64 + `default_dtype='float32'` → a float32 **model**, not
-float32 inputs feeding a float64 net. Train float32 +
-`default_dtype='float64'` → weights cast up for this calculator only.
-
-Full path: [Models — inference](models.md#inference-and-the-ase-calculator).
+`default_dtype` is a constructor argument only (not YAML), same idea as
+MACE `model.float()` / `model.double()`. ``None`` follows
+`settings.dtype`. If it differs, checkpoint weights are cast once at
+load and the TF graph runs in that dtype. See
+[Models](models.md#settings-dtype).
 
 ### Units
 

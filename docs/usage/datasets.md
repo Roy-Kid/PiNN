@@ -28,9 +28,9 @@ We advise you to convert your dataset into the TFRecord format for training. The
 advantage of using this format is that it allows for the storage of preprocessed
 data and batched dataset.
 
-The `.yml` sidecar records each tensor's dtype at convert time. `settings.train_dtype`
+The `.yml` sidecar records each tensor's dtype at convert time. `settings.dtype`
 does not rewrite existing TFRecords; see
-[train_dtype](models.md#settings-train_dtype).
+[dtype](models.md#settings-dtype).
 
 ## Splitting the dataset
 

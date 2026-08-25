@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""settings.train_dtype (YAML) and calculator default_dtype (constructor)."""
+"""settings.dtype (YAML) and calculator default_dtype (constructor)."""
 import os
 import tempfile
 
@@ -10,30 +10,31 @@ from tensorflow.python.lib.io.file_io import FileIO
 
 from pinn.calculator import PiNN_calc
 from pinn.models.base import (
-    apply_train_dtype, tf_dtype_from_name, train_dtype_from_params,
+    apply_dtype, dtype_from_params, tf_dtype_from_name,
 )
 
 
 def test_tf_dtype_from_name():
     assert tf_dtype_from_name('float32') == tf.float32
-    assert tf_dtype_from_name('fp64') == tf.float64
-    assert tf_dtype_from_name('') == tf.float32
+    assert tf_dtype_from_name('float64') == tf.float64
+    assert tf_dtype_from_name(None) == tf.float32
     with pytest.raises(ValueError, match='Unknown dtype'):
         tf_dtype_from_name('float16')
+    with pytest.raises(ValueError, match='Unknown dtype'):
+        tf_dtype_from_name('fp64')
 
 
-def test_train_dtype_from_params():
-    assert train_dtype_from_params({}) == 'float32'
-    assert train_dtype_from_params({'settings': None}) == 'float32'
-    assert train_dtype_from_params(
-        {'settings': {'train_dtype': 'float64'}}) == 'float64'
+def test_dtype_from_params():
+    assert dtype_from_params({}) == 'float32'
+    assert dtype_from_params({'settings': None}) == 'float32'
+    assert dtype_from_params({'settings': {'dtype': 'float64'}}) == 'float64'
 
 
 def test_calc_default_dtype_is_constructor_only():
     class _Model:
-        params = {'settings': {'train_dtype': 'float64'}}
+        params = {'settings': {'dtype': 'float64'}}
 
-    calc = PiNN_calc(model=_Model(), default_dtype='')
+    calc = PiNN_calc(model=_Model())
     assert calc._dtype_name() == 'float64'
     assert calc._tf_dtype() == tf.float64
     calc_override = PiNN_calc(model=_Model(), default_dtype='float32')
@@ -43,34 +44,29 @@ def test_calc_default_dtype_is_constructor_only():
 
 
 @pytest.mark.forked
-def test_unknown_train_dtype_raises():
+def test_unknown_dtype_raises():
     with pytest.raises(ValueError, match='Unknown dtype'):
-        apply_train_dtype('fp16')
+        apply_dtype('fp16')
 
 
 @pytest.mark.forked
 def test_float32_is_the_default():
-    apply_train_dtype('float32')
+    apply_dtype('float32')
     assert tf.keras.backend.floatx() == 'float32'
-    apply_train_dtype(None)
+    apply_dtype(None)
     assert tf.keras.backend.floatx() == 'float32'
 
 
-@pytest.mark.parametrize('name,keras', [
-    ('float32', 'float32'),
-    ('fp32', 'float32'),
-    ('float64', 'float64'),
-    ('fp64', 'float64'),
-])
+@pytest.mark.parametrize('name', ['float32', 'float64'])
 @pytest.mark.forked
-def test_apply_train_dtype(name, keras):
-    apply_train_dtype(name)
-    assert tf.keras.backend.floatx() == keras
-    apply_train_dtype('float32')
+def test_apply_dtype(name):
+    apply_dtype(name)
+    assert tf.keras.backend.floatx() == name
+    apply_dtype('float32')
 
 
 @pytest.mark.forked
-def test_default_params_record_train_dtype():
+def test_default_params_record_dtype():
     import pinn
     testpath = tempfile.mkdtemp()
     params = {
@@ -92,9 +88,9 @@ def test_default_params_record_train_dtype():
     pinn.get_model(params)
     with FileIO(os.path.join(testpath, 'params.yml'), 'r') as f:
         saved = yaml.load(f, Loader=yaml.Loader)
-    assert saved.get('settings', {}).get('train_dtype', 'float32') == 'float32'
+    assert saved.get('settings', {}).get('dtype', 'float32') == 'float32'
     assert 'default_dtype' not in saved.get('settings', {})
-    apply_train_dtype('float32')
+    apply_dtype('float32')
 
 
 @pytest.mark.forked
@@ -112,7 +108,7 @@ def test_float64_trains():
     }
     params = {
         'model_dir': testpath,
-        'settings': {'train_dtype': 'float64'},
+        'settings': {'dtype': 'float64'},
         'network': {
             'name': 'PiNet',
             'params': {
@@ -140,5 +136,5 @@ def test_float64_trains():
     tf.estimator.train_and_evaluate(model, train_spec, eval_spec)
     with FileIO(os.path.join(testpath, 'params.yml'), 'r') as f:
         saved = yaml.load(f, Loader=yaml.Loader)
-    assert saved['settings']['train_dtype'] == 'float64'
-    apply_train_dtype('float32')
+    assert saved['settings']['dtype'] == 'float64'
+    apply_dtype('float32')

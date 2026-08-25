@@ -83,7 +83,7 @@ optimizer:
   config:
     learning_rate: 0.03
 settings:
-  train_dtype: float32   # float32 | float64; training only
+  dtype: float32   # float32 | float64; default float32
 ```
 
 ## Using the CLI
