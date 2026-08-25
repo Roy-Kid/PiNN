@@ -14,7 +14,11 @@ def tf_dtype_from_name(name='float32'):
     """
     if name is None:
         name = 'float32'
-    dtype = tf.as_dtype(name)
+    try:
+        dtype = tf.as_dtype(name)
+    except TypeError as exc:
+        raise ValueError(
+            f'Unknown dtype {name!r}. Expected float32 or float64.') from exc
     if dtype not in (tf.float32, tf.float64):
         raise ValueError(
             f'Unknown dtype {name!r}. Expected float32 or float64.')
